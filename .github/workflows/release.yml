@@ -43,8 +43,6 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Verify source
-        env:
-          CGO_ENABLED: "0"
         run: make check
 
       - name: Install Syft
