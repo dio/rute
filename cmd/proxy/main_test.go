@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -100,6 +101,37 @@ func TestRunAccountListFileStore(t *testing.T) {
 	}
 	if got := stdout.String(); got != "No Codex accounts configured.\n" {
 		t.Errorf("stdout = %q", got)
+	}
+}
+
+func TestRunVersion(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := run(
+		context.Background(),
+		[]string{"version"},
+		&stdout,
+		new(bytes.Buffer),
+		func(string) string { return "" },
+	)
+	if err != nil {
+		t.Fatalf("run version: %v", err)
+	}
+	for _, want := range []string{"rute dev", "commit none", "built unknown"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+		}
+	}
+
+	if err := run(
+		context.Background(),
+		[]string{"version", "extra"},
+		new(bytes.Buffer),
+		new(bytes.Buffer),
+		func(string) string { return "" },
+	); err == nil {
+		t.Fatal("version with an argument succeeded")
 	}
 }
 

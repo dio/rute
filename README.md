@@ -3,12 +3,29 @@
 `rute` contains a Go OAuth 2.0 Authorization Code + PKCE library and a small
 loopback-only OpenAI-compatible proxy backed by a Codex OAuth session.
 
+## Install
+
+Tagged releases contain CGO-free `rute` binaries for macOS and Linux on
+`amd64` and `arm64`. Download the archive for your machine from
+[GitHub Releases](https://github.com/dio/rute/releases), extract it, and move
+`rute` somewhere on your `PATH`:
+
+```sh
+tar -xzf rute_0.1.0_darwin_arm64.tar.gz
+install -m 0755 rute /usr/local/bin/rute
+rute version
+```
+
+Replace the version, OS, and architecture in the filename as needed. On a
+single-user macOS setup where `/usr/local/bin` is not writable, use a directory
+on your personal `PATH` instead.
+
 ## Local proxy
 
 Start the proxy:
 
 ```sh
-go run ./cmd/proxy
+rute
 ```
 
 If no credentials are supplied, it prints an authorization URL and waits up to
@@ -34,7 +51,7 @@ service.
 Native key storage is the default and never silently falls back to plaintext:
 
 ```sh
-go run ./cmd/proxy -credential-store=keyring
+rute -credential-store=keyring
 ```
 
 Linux desktop sessions need a working, unlocked Secret Service collection.
@@ -42,8 +59,8 @@ For headless systems, explicitly opt into a private JSON file or ephemeral
 memory:
 
 ```sh
-go run ./cmd/proxy -credential-store=file
-go run ./cmd/proxy -credential-store=memory
+rute -credential-store=file
+rute -credential-store=memory
 ```
 
 The file backend uses `0600` files inside a `0700` state directory. Override
@@ -52,10 +69,10 @@ its location with `-credential-file=/absolute/path/credentials.json`.
 Manage more than one Codex account with:
 
 ```sh
-go run ./cmd/proxy account add -name personal
-go run ./cmd/proxy account list
-go run ./cmd/proxy account reauth personal
-go run ./cmd/proxy account remove personal
+rute account add -name personal
+rute account list
+rute account reauth personal
+rute account remove personal
 ```
 
 New sessions rotate across healthy accounts and remain pinned to their chosen
@@ -214,4 +231,38 @@ and account policies.
 
 ```sh
 make check
+```
+
+CI additionally runs golangci-lint, `govulncheck`, and CGO-free cross-builds for
+every release target.
+
+### Cutting a release
+
+Install GoReleaser 2.17 or newer and Syft, then validate the release locally:
+
+```sh
+make release-check
+make snapshot
+```
+
+Create and push an annotated semantic-version tag:
+
+```sh
+git tag -a v0.1.0 -m "rute v0.1.0"
+git push origin v0.1.0
+```
+
+The tag starts the release workflow. It reruns the full test suite, builds the
+four release archives, embeds version metadata, generates per-archive SBOMs and
+SHA-256 checksums, publishes the GitHub release, and records GitHub build
+provenance.
+
+To verify a downloaded release with GitHub CLI:
+
+```sh
+gh release download v0.1.0 --repo dio/rute --dir rute-release
+(cd rute-release && shasum -a 256 -c checksums.txt)
+gh attestation verify \
+  rute-release/rute_0.1.0_darwin_arm64.tar.gz \
+  --repo dio/rute
 ```

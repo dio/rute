@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,12 @@ const (
 	defaultLoginTimeout  = 5 * time.Minute
 	shutdownTimeout      = 10 * time.Second
 	defaultStoreKind     = "keyring"
+)
+
+var (
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
 )
 
 type options struct {
@@ -76,6 +83,22 @@ func run(
 	stderr io.Writer,
 	getenv func(string) string,
 ) error {
+	if len(args) > 0 && args[0] == "version" {
+		if len(args) != 1 {
+			return errors.New("version does not accept arguments")
+		}
+		_, err := fmt.Fprintf(
+			stdout,
+			"rute %s (commit %s, built %s, %s, %s/%s)\n",
+			version,
+			commit,
+			buildDate,
+			runtime.Version(),
+			runtime.GOOS,
+			runtime.GOARCH,
+		)
+		return err
+	}
 	if len(args) > 0 && args[0] == "account" {
 		return runAccount(ctx, args[1:], stdout, stderr)
 	}
