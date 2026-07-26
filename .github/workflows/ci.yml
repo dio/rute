@@ -18,8 +18,6 @@ jobs:
     name: Test, race, and vet
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      CGO_ENABLED: "0"
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -44,10 +42,20 @@ jobs:
           fi
 
       - name: Vet
+        env:
+          CGO_ENABLED: "0"
         run: go vet ./...
 
+      - name: Test without CGO
+        env:
+          CGO_ENABLED: "0"
+        run: go test -shuffle=on -coverprofile=coverage.out ./...
+
       - name: Test with race detector
-        run: go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ./...
+        env:
+          # Go's Linux race detector requires CGO for its instrumentation.
+          CGO_ENABLED: "1"
+        run: go test -race -shuffle=on ./...
 
   lint:
     name: Lint
