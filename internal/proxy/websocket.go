@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
 )
@@ -74,6 +75,34 @@ func (handler *Handler) handleResponsesWebSocket(
 			}
 			continue
 		}
+		requestedModel, _ := body["model"].(string)
+		resolution, resolutionErr := handler.config.ModelCatalog.Resolve(
+			requestedModel,
+			handler.config.DefaultModel,
+		)
+		if resolutionErr != nil {
+			if !handler.writeWebSocketError(
+				ctx,
+				connection,
+				"invalid_request_error",
+				resolutionErr.Error(),
+			) {
+				return
+			}
+			continue
+		}
+		if resolution.Provider != accountstore.ProviderCodex {
+			if !handler.writeWebSocketError(
+				ctx,
+				connection,
+				"unsupported_endpoint",
+				"Claude models are not supported by the Responses WebSocket",
+			) {
+				return
+			}
+			continue
+		}
+		body["model"] = resolution.UpstreamModel
 		normalized, normalizeErr := normalizeResponses(
 			body,
 			handler.config.DefaultModel,
@@ -116,7 +145,7 @@ func webSocketProxyError(err error) (string, string) {
 	if errors.Is(err, codexpool.ErrAuthenticationRequired) ||
 		errors.Is(err, codexauth.ErrReauthenticationRequired) {
 		return "authentication_required",
-			"Codex authentication is required; run 'rute-proxy account reauth NAME'"
+			"Codex authentication is required; run 'rute account reauth NAME'"
 	}
 	if errors.Is(err, codexpool.ErrAccountsUnavailable) {
 		return "upstream_accounts_unavailable",

@@ -39,7 +39,12 @@ type Config struct {
 	TokenURL      string
 	HTTPClient    *http.Client
 	RefreshBefore time.Duration
+	Refresh       RefreshFunc
+	Identity      func(oauthpkce.TokenSet) string
 }
+
+// RefreshFunc exchanges a refresh token for a new immutable token snapshot.
+type RefreshFunc func(context.Context, *http.Client, Config, Token) (Token, error)
 
 // Source serves concurrent credential readers and coalesces refreshes.
 type Source struct {
@@ -53,11 +58,17 @@ type Source struct {
 
 // New creates an in-memory credential source.
 func New(cfg Config, tokens oauthpkce.TokenSet) (*Source, error) {
+	identity := ""
+	if cfg.Identity != nil {
+		identity = cfg.Identity(tokens)
+	} else {
+		identity = accountID(tokens.IDToken, tokens.AccessToken)
+	}
 	return newSource(cfg, Token{
 		AccessToken:  tokens.AccessToken,
 		RefreshToken: tokens.RefreshToken,
 		IDToken:      tokens.IDToken,
-		AccountID:    accountID(tokens.IDToken, tokens.AccessToken),
+		AccountID:    identity,
 		Expiry:       tokens.Expiry,
 	})
 }
@@ -192,8 +203,20 @@ func usableFallback(token Token) bool {
 }
 
 func (source *Source) refresh(ctx context.Context, current Token) (Token, error) {
+	if source.config.Refresh != nil {
+		return source.config.Refresh(ctx, source.config.HTTPClient, source.config, current)
+	}
+	return defaultRefresh(ctx, source.config.HTTPClient, source.config, current)
+}
+
+func defaultRefresh(
+	ctx context.Context,
+	client *http.Client,
+	config Config,
+	current Token,
+) (Token, error) {
 	payload, err := json.Marshal(map[string]string{
-		"client_id":     source.config.ClientID,
+		"client_id":     config.ClientID,
 		"grant_type":    "refresh_token",
 		"refresh_token": current.RefreshToken,
 	})
@@ -203,7 +226,7 @@ func (source *Source) refresh(ctx context.Context, current Token) (Token, error)
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		source.config.TokenURL,
+		config.TokenURL,
 		bytes.NewReader(payload),
 	)
 	if err != nil {
@@ -212,7 +235,7 @@ func (source *Source) refresh(ctx context.Context, current Token) (Token, error)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 
-	response, err := source.config.HTTPClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return Token{}, fmt.Errorf("codexauth: refresh request: %w", err)
 	}

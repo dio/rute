@@ -1,7 +1,7 @@
 # rute
 
 `rute` contains a Go OAuth 2.0 Authorization Code + PKCE library and a small
-loopback-only OpenAI-compatible proxy backed by a Codex OAuth session.
+loopback-only compatibility proxy backed by Codex and Claude OAuth sessions.
 
 ## Install
 
@@ -43,9 +43,10 @@ tokens stay in memory and are refreshed automatically.
 
 The command listens on `127.0.0.1:20128` and exposes:
 
-- `POST /v1/responses`, streaming or non-streaming
-- `GET /v1/responses` with a WebSocket upgrade
-- `POST /v1/chat/completions`, streaming or non-streaming
+- `POST /v1/responses`, streaming or non-streaming (Codex)
+- `GET /v1/responses` with a WebSocket upgrade (Codex)
+- `POST /v1/chat/completions`, streaming or non-streaming (Codex or Claude)
+- `POST /v1/messages`, streaming or non-streaming (native Claude)
 - `GET /v1/models`
 - `GET /healthz`
 
@@ -74,19 +75,88 @@ rute -credential-store=memory
 The file backend uses `0600` files inside a `0700` state directory. Override
 its location with `-credential-file=/absolute/path/credentials.json`.
 
-Manage more than one Codex account with:
+Manage provider-scoped accounts with:
 
 ```sh
+# Codex is the default provider.
 rute account add -name personal
+rute account add -provider=claude -name personal
 rute account list
-rute account reauth personal
-rute account remove personal
+rute account list -provider=claude
+rute account reauth -provider=claude personal
+rute account remove -provider=claude personal
 ```
+
+`rute account list` lists every stored account across all supported providers:
+
+```text
+PROVIDER  NAME      STATE   UPSTREAM ACCOUNT
+codex     personal  active  acct_...
+claude    personal  active  -
+```
+
+Use `rute account list -provider=codex` or
+`rute account list -provider=claude` to filter the output. Account names are
+provider-scoped, so the same name can be used once per provider.
 
 New sessions rotate across healthy accounts and remain pinned to their chosen
 account. An account that needs login or is temporarily rate-limited is excluded
 until it recovers. Only authorization and quota failures fail over to another
 account; upstream `5xx` responses are not replayed.
+
+On a fresh installation, running `rute` starts a Codex login. To start with
+Claude instead, add a Claude account first:
+
+```sh
+rute account add -provider=claude -name default
+rute
+```
+
+Each login prints a provider authorization URL and waits for its loopback
+callback. Refresh tokens are stored under separate `rute/codex` and
+`rute/claude` keyring services.
+
+### Model routing
+
+Unprefixed model IDs route to Codex. Prefix a model with `claude/` or `codex/`
+to select a provider explicitly:
+
+```text
+gpt-5.6-sol                 -> Codex model gpt-5.6-sol
+codex/gpt-5.6-sol           -> Codex model gpt-5.6-sol
+claude/claude-sonnet-5      -> Claude model claude-sonnet-5
+```
+
+The native `/v1/messages` endpoint treats an unprefixed model as Claude, while
+still honoring explicit model mappings.
+
+Use `-models-file` to expose stable public aliases and map each alias to an
+upstream provider/model pair:
+
+```json
+[
+  {
+    "id": "coding",
+    "provider": "codex",
+    "upstream_model": "gpt-5.6-sol",
+    "display_name": "Codex"
+  },
+  {
+    "id": "worker-sonnet",
+    "provider": "claude",
+    "upstream_model": "claude-sonnet-5",
+    "display_name": "Claude Sonnet"
+  }
+]
+```
+
+```sh
+rute -models-file=/absolute/path/models.json
+```
+
+The file must be a JSON array. `id`, `provider`, and `upstream_model` are
+required; `provider` must be `codex` or `claude`. Configured aliases are
+returned by `/v1/models` and take precedence over namespace routing.
 
 ### HTTP examples
 
@@ -100,9 +170,27 @@ curl http://127.0.0.1:20128/v1/responses \
 curl http://127.0.0.1:20128/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data '{
-    "model":"gpt-5.6-sol",
+    "model":"claude/claude-sonnet-5",
     "messages":[{"role":"user","content":"Say hello"}],
     "stream":false
+  }'
+```
+
+The Claude Chat Completions adapter supports text, system/developer messages,
+HTTP(S) and base64 images, function tools and results, tool choice, streaming,
+and usage. It rejects unsupported OpenAI-only request fields instead of
+silently changing their meaning. Claude models are not currently supported by
+the Responses HTTP or WebSocket endpoints.
+
+Native Claude Messages requests can be sent without translation:
+
+```sh
+curl http://127.0.0.1:20128/v1/messages \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "model":"claude-sonnet-5",
+    "max_tokens":1024,
+    "messages":[{"role":"user","content":"Say hello"}]
   }'
 ```
 
@@ -173,7 +261,10 @@ and ephemeral; rute does not copy it into persistent storage.
 ## PKCE library
 
 The `oauthpkce` package owns a short-lived loopback callback server and the code
-exchange while leaving browser launch and token persistence to its caller.
+exchange while leaving browser launch and token persistence to its caller. A
+provider can supply a `TokenExchanger` when its token endpoint does not use the
+standard form-encoded OAuth exchange; Claude uses this extension for its JSON
+exchange.
 
 ```go
 package main
@@ -228,12 +319,14 @@ The library itself does not launch a browser, persist or refresh tokens, proxy
 model requests, or issue downstream API keys. Those lifecycle responsibilities
 belong to `cmd/proxy` and its internal credential manager.
 
-## Codex provider notice
+## Provider notice
 
-The Codex profile and proxy behavior mirror an observed Codex CLI protocol.
-They are not an official compatibility promise. Endpoints and request rules can
-change, and callers are responsible for complying with the provider's terms
-and account policies.
+The Codex and Claude profiles mirror observed first-party CLI protocols. They
+are not official compatibility promises. OAuth client behavior, endpoints,
+headers, and request rules can change. Callers are responsible for complying
+with each provider's terms and account policies. Rute deliberately sends only
+the protocol headers needed for OAuth access; it does not spoof a first-party
+CLI's operating system, runtime, SDK, or user-agent fingerprint.
 
 ## Development
 
@@ -244,34 +337,8 @@ make check
 CI additionally runs golangci-lint, `govulncheck`, and CGO-free cross-builds for
 every release target.
 
-### Cutting a release
+To implement another OAuth-backed upstream, follow
+[docs/adding-a-provider.md](docs/adding-a-provider.md).
 
-Install GoReleaser 2.17 or newer and Syft, then validate the release locally:
-
-```sh
-make release-check
-make snapshot
-```
-
-Create and push an annotated semantic-version tag:
-
-```sh
-git tag -a v0.1.0 -m "rute v0.1.0"
-git push origin v0.1.0
-```
-
-The tag starts the release workflow. It reruns the full test suite, builds the
-four release archives, ad-hoc signs and verifies the macOS binaries, embeds
-version metadata, generates per-archive SBOMs and SHA-256 checksums, publishes
-the GitHub release and `dio/tap/rute` formula, and records GitHub build
-provenance.
-
-To verify a downloaded release with GitHub CLI:
-
-```sh
-gh release download v0.1.0 --repo dio/rute --dir rute-release
-(cd rute-release && shasum -a 256 -c checksums.txt)
-gh attestation verify \
-  rute-release/rute_0.1.0_darwin_arm64.tar.gz \
-  --repo dio/rute
-```
+Release preparation, tagging, publication, and artifact verification are
+documented in [docs/releasing.md](docs/releasing.md).

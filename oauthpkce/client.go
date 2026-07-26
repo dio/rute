@@ -100,6 +100,9 @@ func (client *Client) Start() (*Session, error) {
 		verifier:         verifier,
 		oauthConfig:      oauthConfig,
 		httpClient:       client.httpClient,
+		tokenExchanger:   client.config.TokenExchanger,
+		clientID:         client.config.ClientID,
+		tokenURL:         client.config.TokenURL,
 		listener:         listener,
 	}), nil
 }

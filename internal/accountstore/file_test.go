@@ -247,7 +247,108 @@ func TestKeyringStoreKeepsSecretOutOfManifest(t *testing.T) {
 	if err := store.Delete(context.Background(), account.ID); err != nil {
 		t.Fatalf("delete keyring account: %v", err)
 	}
-	if _, err := ring.Get(keyringService, account.ID); !errors.Is(err, keyring.ErrNotFound) {
+	if _, err := ring.Get(
+		keyringService(ProviderCodex),
+		account.ID,
+	); !errors.Is(err, keyring.ErrNotFound) {
 		t.Errorf("keyring get after delete error = %v", err)
+	}
+}
+
+func TestFileStoreMigratesVersionOneRecordsToCodex(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatalf("chmod state directory: %v", err)
+	}
+	path := filepath.Join(directory, "credentials.json")
+	versionOne := `{
+	  "version": 1,
+	  "accounts": [{
+	    "id": "old-id",
+	    "name": "default",
+	    "refresh_token": "refresh",
+	    "state": "active",
+	    "created_at": "2026-07-26T00:00:00Z",
+	    "updated_at": "2026-07-26T00:00:00Z"
+	  }]
+	}`
+	if err := os.WriteFile(path, []byte(versionOne), 0o600); err != nil {
+		t.Fatalf("write version one file: %v", err)
+	}
+	store, err := NewFileStore(path)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	accounts, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].Provider != ProviderCodex {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	if err := store.Put(context.Background(), accounts[0]); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migrated file: %v", err)
+	}
+	if !strings.Contains(string(body), `"version": 2`) ||
+		!strings.Contains(string(body), `"provider": "codex"`) {
+		t.Errorf("migrated body = %s", body)
+	}
+}
+
+func TestMemoryStoreScopesNamesByProvider(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	for _, provider := range []string{ProviderCodex, ProviderClaude} {
+		if err := store.Put(context.Background(), Account{
+			ID:           provider,
+			Provider:     provider,
+			Name:         "default",
+			RefreshToken: "refresh",
+		}); err != nil {
+			t.Fatalf("put %s: %v", provider, err)
+		}
+	}
+	accounts, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+}
+
+func TestKeyringStoreSeparatesProviderServices(t *testing.T) {
+	t.Parallel()
+	manifest, err := NewFileStore(
+		filepath.Join(t.TempDir(), "state", "accounts.json"),
+	)
+	if err != nil {
+		t.Fatalf("new manifest: %v", err)
+	}
+	ring := newFakeKeyring()
+	store := newKeyringStore(ring, manifest)
+	for _, provider := range []string{ProviderCodex, ProviderClaude} {
+		if err := store.Put(context.Background(), Account{
+			ID:           provider + "-id",
+			Provider:     provider,
+			Name:         "default",
+			RefreshToken: provider + "-refresh",
+		}); err != nil {
+			t.Fatalf("put %s account: %v", provider, err)
+		}
+	}
+	for _, provider := range []string{ProviderCodex, ProviderClaude} {
+		token, err := ring.Get(keyringService(provider), provider+"-id")
+		if err != nil {
+			t.Fatalf("get %s token: %v", provider, err)
+		}
+		if token != provider+"-refresh" {
+			t.Errorf("%s token = %q", provider, token)
+		}
 	}
 }

@@ -17,6 +17,22 @@ import (
 	"golang.org/x/oauth2"
 )
 
+type recordingExchanger struct {
+	requests chan ExchangeRequest
+}
+
+func (exchanger recordingExchanger) Exchange(
+	_ context.Context,
+	_ *http.Client,
+	request ExchangeRequest,
+) (TokenSet, error) {
+	exchanger.requests <- request
+	return TokenSet{
+		AccessToken:  "custom-access",
+		RefreshToken: "custom-refresh",
+	}, nil
+}
+
 func TestSession_SuccessfulExchange(t *testing.T) {
 	t.Parallel()
 
@@ -57,7 +73,9 @@ func TestSession_SuccessfulExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer session.Close()
+	defer func() {
+		_ = session.Close()
+	}()
 
 	authorizationURL := mustParseURL(t, session.AuthorizationURL())
 	query := authorizationURL.Query()
@@ -81,7 +99,7 @@ func TestSession_SuccessfulExchange(t *testing.T) {
 		response.Body.Close()
 		t.Fatalf("callback status = %d, body = %q", response.StatusCode, body)
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -131,6 +149,56 @@ func TestSession_SuccessfulExchange(t *testing.T) {
 	}
 	if got, want := query.Get("code_challenge"), oauth2.S256ChallengeFromVerifier(verifier); got != want {
 		t.Fatalf("code_challenge = %q, want %q", got, want)
+	}
+}
+
+func TestSession_CustomTokenExchanger(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan ExchangeRequest, 1)
+	cfg := validTestConfig("https://token.example.test")
+	cfg.TokenExchanger = recordingExchanger{requests: requests}
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	session, err := client.Start()
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = session.Close()
+	}()
+
+	authorizationURL := mustParseURL(t, session.AuthorizationURL())
+	state := authorizationURL.Query().Get("state")
+	response := getCallback(t, session.RedirectURI(), url.Values{
+		"state": {state},
+		"code":  {"custom-code"},
+	}, "")
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("callback status = %d, want 200", response.StatusCode)
+	}
+
+	tokens, err := session.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if tokens.AccessToken != "custom-access" ||
+		tokens.RefreshToken != "custom-refresh" {
+		t.Fatalf("tokens = %v", tokens)
+	}
+	request := <-requests
+	if request.Code != "custom-code" ||
+		request.State != state ||
+		request.RedirectURI != session.RedirectURI() ||
+		request.CodeVerifier == "" {
+		t.Errorf("exchange request = %+v", request)
+	}
+	if got, want := authorizationURL.Query().Get("code_challenge"),
+		oauth2.S256ChallengeFromVerifier(request.CodeVerifier); got != want {
+		t.Errorf("code challenge = %q, want %q", got, want)
 	}
 }
 
@@ -324,6 +392,22 @@ func TestSecretBearingTypesFormatRedacted(t *testing.T) {
 	for _, secret := range []string{"state-secret", "verifier-secret"} {
 		if strings.Contains(formattedSession, secret) {
 			t.Fatalf("formatted Session exposes %q: %s", secret, formattedSession)
+		}
+	}
+
+	exchange := ExchangeRequest{
+		Code:         "code-secret",
+		State:        "state-secret",
+		CodeVerifier: "verifier-secret",
+	}
+	formattedExchange := fmt.Sprintf("%+v %#v", exchange, exchange)
+	for _, secret := range []string{"code-secret", "state-secret", "verifier-secret"} {
+		if strings.Contains(formattedExchange, secret) {
+			t.Fatalf(
+				"formatted ExchangeRequest exposes %q: %s",
+				secret,
+				formattedExchange,
+			)
 		}
 	}
 }

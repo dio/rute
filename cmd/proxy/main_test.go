@@ -51,11 +51,25 @@ func TestParseOptionsCredentialStore(t *testing.T) {
 	if opts.credentialKind != "file" || opts.credentialFile != path {
 		t.Errorf("storage options = %q, %q", opts.credentialKind, opts.credentialFile)
 	}
+	if opts.modelsFile != "" {
+		t.Errorf("models file = %q, want empty", opts.modelsFile)
+	}
 	if _, err := parseOptions(
 		[]string{"-credential-store=keyring", "-credential-file=" + path},
 		new(bytes.Buffer),
 	); err == nil {
 		t.Fatal("credential-file with keyring succeeded")
+	}
+
+	opts, err = parseOptions(
+		[]string{"-models-file=/tmp/models.json"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse models file: %v", err)
+	}
+	if opts.modelsFile != "/tmp/models.json" {
+		t.Errorf("models file = %q", opts.modelsFile)
 	}
 }
 
@@ -69,8 +83,21 @@ func TestParseAccountOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse account options: %v", err)
 	}
-	if opts.action != "add" || opts.name != "personal" || opts.credentialKind != "file" {
+	if opts.action != "add" ||
+		opts.provider != "codex" ||
+		opts.name != "personal" ||
+		opts.credentialKind != "file" {
 		t.Errorf("options = %+v", opts)
+	}
+	opts, err = parseAccountOptions(
+		[]string{"add", "-provider=claude", "-name=personal"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse Claude account options: %v", err)
+	}
+	if opts.provider != "claude" {
+		t.Errorf("provider = %q, want claude", opts.provider)
 	}
 	if _, err := parseAccountOptions(
 		[]string{"remove", "bad name"},
@@ -99,7 +126,7 @@ func TestRunAccountListFileStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run account list: %v", err)
 	}
-	if got := stdout.String(); got != "No Codex accounts configured.\n" {
+	if got := stdout.String(); got != "No accounts configured.\n" {
 		t.Errorf("stdout = %q", got)
 	}
 }

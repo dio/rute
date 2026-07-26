@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/dio/rute/internal/accountstore"
 )
 
 func (handler *Handler) handleResponses(writer http.ResponseWriter, request *http.Request) {
@@ -40,6 +42,32 @@ func (handler *Handler) handleResponses(writer http.ResponseWriter, request *htt
 	}
 	stream, _ := body["stream"].(bool)
 	sessionID := requestSessionID(request)
+	requestedModel, _ := body["model"].(string)
+	resolution, err := handler.config.ModelCatalog.Resolve(
+		requestedModel,
+		handler.config.DefaultModel,
+	)
+	if err != nil {
+		writeAPIError(
+			writer,
+			http.StatusBadRequest,
+			err.Error(),
+			"invalid_request_error",
+			"invalid_model",
+		)
+		return
+	}
+	if resolution.Provider != accountstore.ProviderCodex {
+		writeAPIError(
+			writer,
+			http.StatusBadRequest,
+			"Claude models are not supported by /v1/responses",
+			"invalid_request_error",
+			"unsupported_endpoint",
+		)
+		return
+	}
+	body["model"] = resolution.UpstreamModel
 	normalized, err := normalizeResponses(body, handler.config.DefaultModel, sessionID)
 	if err != nil {
 		writeAPIError(

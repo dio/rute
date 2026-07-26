@@ -1,5 +1,5 @@
-// Package proxy implements the unauthenticated loopback OpenAI-compatible
-// facade backed by a Codex OAuth session.
+// Package proxy implements the unauthenticated loopback compatibility facade
+// backed by provider OAuth sessions.
 package proxy
 
 import (
@@ -16,8 +16,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/modelcatalog"
+	"github.com/dio/rute/providers/claude"
 	"github.com/dio/rute/providers/codex"
 )
 
@@ -39,20 +42,32 @@ type credentialSource interface {
 
 // Config configures an OpenAI-compatible proxy handler.
 type Config struct {
-	UpstreamURL    string
-	DefaultModel   string
-	HTTPClient     *http.Client
-	MaxRequestSize int64
+	UpstreamURL       string
+	ClaudeUpstreamURL string
+	DefaultModel      string
+	HTTPClient        *http.Client
+	MaxRequestSize    int64
+	ModelCatalog      *modelcatalog.Catalog
 }
 
-// Handler routes OpenAI-compatible requests to a Codex Responses upstream.
+// Handler routes compatible requests to Codex and Claude upstreams.
 type Handler struct {
 	config      Config
-	credentials credentialSource
+	credentials map[string]credentialSource
 }
 
 // New validates cfg and creates a proxy handler.
 func New(cfg Config, credentials credentialSource) (*Handler, error) {
+	return NewMulti(cfg, credentials, nil)
+}
+
+// NewMulti creates a proxy with Codex and optional Claude credentials.
+func NewMulti(
+	cfg Config,
+	codexCredentials credentialSource,
+	claudeCredentials credentialSource,
+) (*Handler, error) {
+	credentials := codexCredentials
 	if credentials == nil {
 		return nil, errors.New("proxy: credentials are required")
 	}
@@ -60,6 +75,12 @@ func New(cfg Config, credentials credentialSource) (*Handler, error) {
 		cfg.UpstreamURL = codex.ResponsesURL
 	}
 	if err := validateUpstreamURL(cfg.UpstreamURL); err != nil {
+		return nil, err
+	}
+	if cfg.ClaudeUpstreamURL == "" {
+		cfg.ClaudeUpstreamURL = claude.MessagesURL
+	}
+	if err := validateUpstreamURL(cfg.ClaudeUpstreamURL); err != nil {
 		return nil, err
 	}
 	if cfg.DefaultModel == "" {
@@ -71,9 +92,18 @@ func New(cfg Config, credentials credentialSource) (*Handler, error) {
 	if cfg.MaxRequestSize <= 0 {
 		cfg.MaxRequestSize = defaultMaxRequestBytes
 	}
+	if cfg.ModelCatalog == nil {
+		cfg.ModelCatalog = modelcatalog.Empty()
+	}
+	sources := map[string]credentialSource{
+		accountstore.ProviderCodex: codexCredentials,
+	}
+	if claudeCredentials != nil {
+		sources[accountstore.ProviderClaude] = claudeCredentials
+	}
 	return &Handler{
 		config:      cfg,
-		credentials: credentials,
+		credentials: sources,
 	}, nil
 }
 
@@ -86,6 +116,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		handler.handleResponses(writer, request)
 	case "/v1/chat/completions":
 		handler.handleChatCompletions(writer, request)
+	case "/v1/messages":
+		handler.handleClaudeMessages(writer, request)
 	case "/v1/models":
 		handler.handleModels(writer, request)
 	default:
@@ -125,17 +157,24 @@ func (handler *Handler) handleModels(writer http.ResponseWriter, request *http.R
 		)
 		return
 	}
+	models := handler.config.ModelCatalog.Models(handler.config.DefaultModel)
+	data := make([]any, 0, len(models))
+	for _, model := range models {
+		item := map[string]any{
+			"id":       model.ID,
+			"object":   "model",
+			"created":  0,
+			"owned_by": model.Provider,
+		}
+		if model.DisplayName != "" {
+			item["display_name"] = model.DisplayName
+		}
+		data = append(data, item)
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"object": "list",
 		"models": []any{},
-		"data": []any{
-			map[string]any{
-				"id":       handler.config.DefaultModel,
-				"object":   "model",
-				"created":  0,
-				"owned_by": "rute",
-			},
-		},
+		"data":   data,
 	})
 }
 
@@ -150,7 +189,11 @@ func (handler *Handler) upstream(
 	}
 	excluded := make(map[string]struct{})
 	for {
-		lease, err := handler.credentials.Acquire(ctx, sessionID, excluded)
+		lease, err := handler.credentials[accountstore.ProviderCodex].Acquire(
+			ctx,
+			sessionID,
+			excluded,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -164,7 +207,10 @@ func (handler *Handler) upstream(
 		}
 		if authorizationStatus(response.StatusCode) {
 			discardResponse(response)
-			refreshed, refreshErr := handler.credentials.ForceRefresh(ctx, lease.AccountID)
+			refreshed, refreshErr := handler.credentials[accountstore.ProviderCodex].ForceRefresh(
+				ctx,
+				lease.AccountID,
+			)
 			if refreshErr != nil {
 				excluded[lease.AccountID] = struct{}{}
 				continue
@@ -175,7 +221,7 @@ func (handler *Handler) upstream(
 			}
 			if authorizationStatus(response.StatusCode) {
 				discardResponse(response)
-				handler.credentials.MarkAuthorizationFailure(lease.AccountID)
+				handler.credentials[accountstore.ProviderCodex].MarkAuthorizationFailure(lease.AccountID)
 				excluded[lease.AccountID] = struct{}{}
 				continue
 			}
@@ -185,7 +231,7 @@ func (handler *Handler) upstream(
 		}
 		until := rateLimitUntil(response)
 		discardResponse(response)
-		handler.credentials.MarkRateLimited(lease.AccountID, until)
+		handler.credentials[accountstore.ProviderCodex].MarkRateLimited(lease.AccountID, until)
 		excluded[lease.AccountID] = struct{}{}
 	}
 }

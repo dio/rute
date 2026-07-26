@@ -44,6 +44,7 @@ type Config struct {
 	AuthorizationParams url.Values
 	Loopback            LoopbackConfig
 	HTTPClient          *http.Client
+	TokenExchanger      TokenExchanger
 }
 
 func normalizeConfig(cfg Config) (Config, error) {

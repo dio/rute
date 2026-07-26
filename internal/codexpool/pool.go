@@ -54,6 +54,7 @@ type accountSnapshot struct {
 // Pool manages account selection, refreshing, and persistence.
 type Pool struct {
 	store      accountstore.Store
+	provider   string
 	authConfig codexauth.Config
 	stderr     io.Writer
 
@@ -71,8 +72,28 @@ func New(
 	authConfig codexauth.Config,
 	stderr io.Writer,
 ) (*Pool, error) {
+	return NewProvider(
+		ctx,
+		store,
+		accountstore.ProviderCodex,
+		authConfig,
+		stderr,
+	)
+}
+
+// NewProvider loads accounts belonging to provider from store.
+func NewProvider(
+	ctx context.Context,
+	store accountstore.Store,
+	provider string,
+	authConfig codexauth.Config,
+	stderr io.Writer,
+) (*Pool, error) {
 	if store == nil {
 		return nil, errors.New("codexpool: store is required")
+	}
+	if provider != accountstore.ProviderCodex && provider != accountstore.ProviderClaude {
+		return nil, fmt.Errorf("codexpool: unsupported provider %q", provider)
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -83,11 +104,15 @@ func New(
 	}
 	pool := &Pool{
 		store:      store,
+		provider:   provider,
 		authConfig: authConfig,
 		stderr:     stderr,
 		sessions:   make(map[string]sessionBinding),
 	}
 	for _, record := range records {
+		if record.Provider != provider {
+			continue
+		}
 		if record.RefreshToken == "" {
 			record.State = accountstore.StateReauthRequired
 			pool.accounts = append(pool.accounts, &account{record: record})
@@ -127,11 +152,13 @@ func NewEphemeral(
 	now := time.Now().UTC()
 	return &Pool{
 		store:      accountstore.NewMemoryStore(),
+		provider:   accountstore.ProviderCodex,
 		authConfig: authConfig,
 		stderr:     stderr,
 		accounts: []*account{{
 			record: accountstore.Account{
 				ID:           "environment",
+				Provider:     accountstore.ProviderCodex,
 				Name:         "environment",
 				AccountID:    token.AccountID,
 				RefreshToken: token.RefreshToken,
@@ -187,6 +214,7 @@ func (pool *Pool) Add(
 	now := time.Now().UTC()
 	record := accountstore.Account{
 		ID:           id,
+		Provider:     pool.provider,
 		Name:         name,
 		AccountID:    token.AccountID,
 		RefreshToken: token.RefreshToken,
@@ -684,12 +712,16 @@ func (pool *Pool) snapshotAccounts() []accountSnapshot {
 }
 
 func jitteredAuthConfig(config codexauth.Config, key string) codexauth.Config {
-	if config.RefreshBefore > 0 {
-		return config
+	refreshBefore := config.RefreshBefore
+	if refreshBefore <= 0 {
+		refreshBefore = defaultRefreshBefore
 	}
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(key))
 	jitter := time.Duration(hash.Sum32()%uint32(maxRefreshJitter/time.Second)) * time.Second
-	config.RefreshBefore = defaultRefreshBefore - jitter
+	if jitter >= refreshBefore {
+		jitter = refreshBefore / 2
+	}
+	config.RefreshBefore = refreshBefore - jitter
 	return config
 }

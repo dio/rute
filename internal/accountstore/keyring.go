@@ -8,8 +8,6 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-const keyringService = "rute/codex"
-
 type keyringAPI interface {
 	Get(service, user string) (string, error)
 	Set(service, user, password string) error
@@ -60,7 +58,7 @@ func (store *KeyringStore) List(ctx context.Context) ([]Account, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		token, err := store.keyring.Get(keyringService, accounts[index].ID)
+		token, err := store.keyring.Get(keyringService(accounts[index].Provider), accounts[index].ID)
 		if errors.Is(err, keyring.ErrNotFound) {
 			accounts[index].State = StateReauthRequired
 			continue
@@ -100,14 +98,15 @@ func (store *KeyringStore) Put(ctx context.Context, account Account) error {
 			break
 		}
 	}
-	if err := store.keyring.Set(keyringService, account.ID, account.RefreshToken); err != nil {
+	service := keyringService(account.Provider)
+	if err := store.keyring.Set(service, account.ID, account.RefreshToken); err != nil {
 		return fmt.Errorf("accountstore: write native keyring: %w", err)
 	}
 	metadata := account
 	metadata.RefreshToken = ""
 	if err := store.manifest.Put(ctx, metadata); err != nil {
 		if !wasPresent {
-			_ = store.keyring.Delete(keyringService, account.ID)
+			_ = store.keyring.Delete(service, account.ID)
 		}
 		return err
 	}
@@ -119,9 +118,30 @@ func (store *KeyringStore) Delete(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	err := store.keyring.Delete(keyringService, id)
+	accounts, err := store.manifest.List(ctx)
+	if err != nil {
+		return err
+	}
+	var provider string
+	for _, account := range accounts {
+		if account.ID == id {
+			provider = account.Provider
+			break
+		}
+	}
+	if provider == "" {
+		return ErrNotFound
+	}
+	err = store.keyring.Delete(keyringService(provider), id)
 	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		return fmt.Errorf("accountstore: delete native keyring item: %w", err)
 	}
 	return store.manifest.Delete(ctx, id)
+}
+
+func keyringService(provider string) string {
+	if provider == "" {
+		provider = ProviderCodex
+	}
+	return "rute/" + provider
 }
