@@ -21,6 +21,7 @@ const (
 	refreshInterval      = 30 * time.Second
 	refreshConcurrency   = 2
 	persistRetryInterval = 30 * time.Second
+	auditWriteTimeout    = 5 * time.Second
 	defaultRefreshBefore = 5 * time.Minute
 	maxRefreshJitter     = 30 * time.Second
 )
@@ -225,6 +226,13 @@ func (pool *Pool) Add(
 	if err := pool.store.Put(ctx, record); err != nil {
 		return accountstore.Account{}, err
 	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountAdded,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 	pool.mu.Lock()
 	pool.accounts = append(pool.accounts, &account{
 		record:        record,
@@ -273,6 +281,13 @@ func (pool *Pool) Reauth(
 	if err := pool.store.Put(ctx, record); err != nil {
 		return err
 	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountReauthenticated,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 	pool.mu.Lock()
 	target.record = record
 	target.source = source
@@ -292,19 +307,26 @@ func (pool *Pool) Delete(ctx context.Context, name string) error {
 		pool.mu.Unlock()
 		return accountstore.ErrNotFound
 	}
-	id := target.record.ID
+	record := target.record
 	pool.mu.Unlock()
-	if err := pool.store.Delete(ctx, id); err != nil {
+	if err := pool.store.Delete(ctx, record.ID); err != nil {
 		return err
 	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountRemoved,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 	pool.mu.Lock()
 	for index, candidate := range pool.accounts {
-		if candidate.record.ID == id {
+		if candidate.record.ID == record.ID {
 			pool.accounts = append(pool.accounts[:index], pool.accounts[index+1:]...)
 			break
 		}
 	}
-	pool.unbindAccountLocked(id)
+	pool.unbindAccountLocked(record.ID)
 	pool.mu.Unlock()
 	return nil
 }
@@ -534,6 +556,13 @@ func (pool *Pool) persistToken(
 	item.storedRefresh = token.RefreshToken
 	item.dirty = false
 	pool.mu.Unlock()
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditCredentialsRefreshed,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 }
 
 func (pool *Pool) markReauthRequired(ctx context.Context, item *account) {
@@ -554,7 +583,31 @@ func (pool *Pool) markReauthRequired(ctx context.Context, item *account) {
 				record.Name,
 				err,
 			)
+			return
 		}
+		pool.recordAudit(ctx, accountstore.AuditEvent{
+			Action:      accountstore.AuditReauthRequired,
+			Provider:    record.Provider,
+			RecordID:    record.ID,
+			AccountName: record.Name,
+			State:       record.State,
+		})
+	}
+}
+
+func (pool *Pool) recordAudit(ctx context.Context, event accountstore.AuditEvent) {
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	if err := accountstore.RecordAudit(auditCtx, pool.store, event); err != nil {
+		_, _ = fmt.Fprintf(
+			pool.stderr,
+			"rute proxy: credential change succeeded but could not append %q audit event "+
+				"for %s account %q: %v\n",
+			event.Action,
+			event.Provider,
+			event.AccountName,
+			err,
+		)
 	}
 }
 

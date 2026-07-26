@@ -40,6 +40,7 @@ Add the provider constant in `internal/accountstore/store.go`, then include it
 in the provider validation performed by:
 
 - `accountstore.normalizeAccount`;
+- `accountstore.validProvider`, for audit history validation;
 - `codexpool.NewProvider`;
 - `modelcatalog.normalizeModel`; and
 - the CLI's provider validation in `cmd/proxy/main.go`.
@@ -129,6 +130,12 @@ Keep these behaviors:
 - identical account names are allowed across providers, but not twice within
   one provider.
 
+The shared account pool records redacted lifecycle events automatically.
+Confirm that the new provider is accepted by audit validation and that
+`account history -provider=<id>` filters its events. Do not add provider tokens,
+upstream account IDs, token fingerprints, exchange errors, or provider response
+bodies to `AuditEvent`.
+
 ## 5. Register credentials with the proxy
 
 Load a provider-specific `codexpool.Pool` from the shared account store during
@@ -207,6 +214,7 @@ require live accounts. At minimum, cover:
 - provider-scoped file and keyring storage;
 - v1 credential migration if storage changes;
 - add/list/filter/reauth/remove CLI parsing;
+- redacted, provider-filtered audit history and hash-chain corruption rejection;
 - explicit mapping, namespace routing, and unprefixed fallback;
 - downstream auth stripping and upstream OAuth injection;
 - native and translated non-streaming responses;

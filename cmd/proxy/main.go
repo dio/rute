@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -56,6 +57,7 @@ type accountOptions struct {
 	action         string
 	provider       string
 	name           string
+	output         string
 	loginTimeout   time.Duration
 	credentialKind string
 	credentialFile string
@@ -297,6 +299,53 @@ func runAccount(
 	}
 
 	switch opts.action {
+	case "history":
+		events, err := accountstore.AuditHistory(ctx, store, accountstore.AuditFilter{
+			Provider:    opts.provider,
+			AccountName: opts.name,
+		})
+		if err != nil {
+			return err
+		}
+		if opts.output == "json" {
+			encoder := json.NewEncoder(stdout)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(events)
+		}
+		if len(events) == 0 {
+			_, err := fmt.Fprintln(stdout, "No account history recorded.")
+			return err
+		}
+		if _, err := fmt.Fprintln(
+			stdout,
+			"TIME\tSEQUENCE\tPROVIDER\tNAME\tACTION\tSTATE\tHASH",
+		); err != nil {
+			return err
+		}
+		for _, event := range events {
+			state := string(event.State)
+			if state == "" {
+				state = "-"
+			}
+			hash := event.Hash
+			if len(hash) > 12 {
+				hash = hash[:12]
+			}
+			if _, err := fmt.Fprintf(
+				stdout,
+				"%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+				event.Timestamp.Format(time.RFC3339),
+				event.Sequence,
+				event.Provider,
+				event.AccountName,
+				event.Action,
+				state,
+				hash,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
 	case "list":
 		providers := []string{
 			accountstore.ProviderCodex,
@@ -473,19 +522,19 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error) {
 	if len(args) == 0 {
 		return accountOptions{}, errors.New(
-			"account action is required: add, list, reauth, or remove",
+			"account action is required: add, history, list, reauth, or remove",
 		)
 	}
 	opts := accountOptions{action: args[0]}
 	switch opts.action {
-	case "add", "reauth", "remove", "list":
+	case "add", "history", "reauth", "remove", "list":
 	default:
 		return accountOptions{}, fmt.Errorf("unsupported account action %q", opts.action)
 	}
 	flags := flag.NewFlagSet("rute-proxy account "+opts.action, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	providerHelp := "account provider: codex or claude (default: codex)"
-	if opts.action == "list" {
+	if opts.action == "list" || opts.action == "history" {
 		providerHelp = "account provider filter: codex or claude (default: all)"
 	}
 	flags.StringVar(
@@ -505,6 +554,14 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			"maximum time to complete browser login",
 		)
 	}
+	if opts.action == "history" {
+		flags.StringVar(
+			&opts.output,
+			"output",
+			"table",
+			"history output: table or json",
+		)
+	}
 	addStorageFlags(flags, &opts.credentialKind, &opts.credentialFile)
 	if err := flags.Parse(args[1:]); err != nil {
 		return accountOptions{}, err
@@ -518,12 +575,24 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			)
 		}
 		opts.name = strings.TrimSpace(flags.Arg(0))
+	case "history":
+		if flags.NArg() > 1 {
+			return accountOptions{}, errors.New(
+				"account history accepts at most one account name",
+			)
+		}
+		if flags.NArg() == 1 {
+			opts.name = strings.TrimSpace(flags.Arg(0))
+			if err := accountstore.ValidateName(opts.name); err != nil {
+				return accountOptions{}, err
+			}
+		}
 	default:
 		if flags.NArg() != 0 {
 			return accountOptions{}, errors.New("unexpected positional arguments")
 		}
 	}
-	if opts.action != "list" {
+	if opts.action != "list" && opts.action != "history" {
 		if opts.provider == "" {
 			opts.provider = accountstore.ProviderCodex
 		}
@@ -536,6 +605,9 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 		opts.provider != accountstore.ProviderCodex &&
 		opts.provider != accountstore.ProviderClaude {
 		return accountOptions{}, errors.New("provider must be codex or claude")
+	}
+	if opts.action == "history" && opts.output != "table" && opts.output != "json" {
+		return accountOptions{}, errors.New("output must be table or json")
 	}
 	if (opts.action == "add" || opts.action == "reauth") && opts.loginTimeout <= 0 {
 		return accountOptions{}, errors.New("login-timeout must be positive")

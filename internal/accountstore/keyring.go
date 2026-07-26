@@ -139,6 +139,19 @@ func (store *KeyringStore) Delete(ctx context.Context, id string) error {
 	return store.manifest.Delete(ctx, id)
 }
 
+// RecordAudit appends an event beside the redacted keyring manifest.
+func (store *KeyringStore) RecordAudit(ctx context.Context, event AuditEvent) error {
+	return store.manifest.RecordAudit(ctx, event)
+}
+
+// AuditHistory returns verified events beside the redacted keyring manifest.
+func (store *KeyringStore) AuditHistory(
+	ctx context.Context,
+	filter AuditFilter,
+) ([]AuditEvent, error) {
+	return store.manifest.AuditHistory(ctx, filter)
+}
+
 func keyringService(provider string) string {
 	if provider == "" {
 		provider = ProviderCodex

@@ -74,6 +74,10 @@ rute -credential-store=memory
 
 The file backend uses `0600` files inside a `0700` state directory. Override
 its location with `-credential-file=/absolute/path/credentials.json`.
+For portable or headless provisioning, one file can hold multiple accounts
+across multiple providers. See
+[docs/credentials.md](docs/credentials.md) for the complete credential-bundle
+workflow and its security requirements.
 
 Manage provider-scoped accounts with:
 
@@ -83,6 +87,8 @@ rute account add -name personal
 rute account add -provider=claude -name personal
 rute account list
 rute account list -provider=claude
+rute account history
+rute account history -provider=claude personal
 rute account reauth -provider=claude personal
 rute account remove -provider=claude personal
 ```
@@ -98,6 +104,14 @@ claude    personal  active  -
 Use `rute account list -provider=codex` or
 `rute account list -provider=claude` to filter the output. Account names are
 provider-scoped, so the same name can be used once per provider.
+
+Credential changes also append metadata-only events to a private,
+hash-chained audit log. `rute account history` verifies the complete chain
+before displaying it; add `-output=json` for machine-readable output. The log
+contains provider, local record ID, account name, state, action, time, and
+chain hashes—never OAuth tokens, authorization codes, PKCE verifiers, or token
+fingerprints. See [docs/credentials.md](docs/credentials.md#audit-credential-changes)
+for its guarantees and limitations.
 
 New sessions rotate across healthy accounts and remain pinned to their chosen
 account. An account that needs login or is temporarily rate-limited is excluded
@@ -246,17 +260,60 @@ header. Set `supports_websockets = false` to use HTTP SSE instead.
 
 ### Supplying credentials non-interactively
 
-The proxy accepts credentials through:
+The recommended multi-account, multi-provider workflow is to complete OAuth
+once per account and write every account into one private credential bundle:
+
+```sh
+install -d -m 0700 /absolute/private/path
+
+rute account add \
+  -provider=codex \
+  -name=codex-primary \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+
+rute account add \
+  -provider=claude \
+  -name=claude-primary \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+
+rute account list \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+```
+
+Provisioning opens the browser once for each account. Subsequent starts are
+non-interactive:
+
+```sh
+rute \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+```
+
+The file contains refresh tokens, not a GCP-style immutable service-account
+key. It must remain `0600`, must not be committed or logged, and must stay
+writable so rute can persist rotated refresh tokens. Use one running rute
+process per credential bundle. Rute writes redacted history beside it at
+`credentials.json.audit.jsonl`; do not use copies of old secret-bearing
+credential bundles as an audit mechanism.
+
+For backward-compatible single-account Codex automation, the proxy also
+accepts:
 
 - `RUTE_CODEX_ACCESS_TOKEN`
 - `RUTE_CODEX_REFRESH_TOKEN`
 - `RUTE_CODEX_ID_TOKEN`
 - `RUTE_CODEX_EXPIRES_AT` (optional RFC3339 timestamp)
 
-Treat all token values as secrets. Environment variables are useful for local
-automation, but an OS credential store is preferable for long-lived tooling.
 When `RUTE_CODEX_ACCESS_TOKEN` is set, the environment credential is exclusive
-and ephemeral; rute does not copy it into persistent storage.
+and ephemeral: persistent Codex and Claude accounts are not loaded, and rotated
+refresh tokens are not written back anywhere. Environment mode therefore does
+not provide multi-account or multi-provider operation.
+
+See [docs/credentials.md](docs/credentials.md) for provisioning, deployment,
+rotation, and recovery details.
 
 ## PKCE library
 
