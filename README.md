@@ -20,6 +20,14 @@ Replace the version, OS, and architecture in the filename as needed. On a
 single-user macOS setup where `/usr/local/bin` is not writable, use a directory
 on your personal `PATH` instead.
 
+Homebrew users can install and upgrade through
+[`dio/homebrew-tap`](https://github.com/dio/homebrew-tap):
+
+```sh
+brew install dio/tap/rute
+brew upgrade rute
+```
+
 ## Local proxy
 
 Start the proxy:
@@ -253,8 +261,9 @@ git push origin v0.1.0
 ```
 
 The tag starts the release workflow. It reruns the full test suite, builds the
-four release archives, embeds version metadata, generates per-archive SBOMs and
-SHA-256 checksums, publishes the GitHub release, and records GitHub build
+four release archives, ad-hoc signs and verifies the macOS binaries, embeds
+version metadata, generates per-archive SBOMs and SHA-256 checksums, publishes
+the GitHub release and `dio/tap/rute` formula, and records GitHub build
 provenance.
 
 To verify a downloaded release with GitHub CLI:

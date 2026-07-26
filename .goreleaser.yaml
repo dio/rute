@@ -25,6 +25,9 @@ builds:
       - darwin_arm64
       - linux_amd64_v1
       - linux_arm64
+    hooks:
+      post:
+        - './scripts/codesign-darwin.sh "{{ .Target }}" "{{ .Path }}"'
 
 archives:
   - ids:
@@ -35,6 +38,12 @@ archives:
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
       - README.md
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+  format: tar.gz
+  prefix_template: "{{ .ProjectName }}-{{ .Version }}/"
 
 sboms:
   - id: archives
