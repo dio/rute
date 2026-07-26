@@ -23,6 +23,7 @@ source_name="rute_${version}_source.tar.gz"
 checksums_file="$repo_root/dist/checksums.txt"
 template="$repo_root/packaging/homebrew/rute.rb.tmpl"
 tap_repository=${HOMEBREW_TAP_REPOSITORY:-ssh://git@github.com/dio/homebrew-tap.git}
+tap_clone_repository=${HOMEBREW_TAP_CLONE_REPOSITORY:-https://github.com/dio/homebrew-tap.git}
 tap_name=${HOMEBREW_TAP_NAME:-dio/tap}
 
 checksum=$(awk -v name="$source_name" '$2 == name { print $1 }' "$checksums_file")
@@ -44,7 +45,7 @@ umask 022
 
 GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 export GIT_SSH_COMMAND
-brew tap "$tap_name" "$tap_repository"
+brew tap "$tap_name" "$tap_clone_repository"
 tap_dir=$(brew --repository "$tap_name")
 git -C "$tap_dir" remote set-url origin "$tap_repository"
 git -C "$tap_dir" pull --ff-only origin main
