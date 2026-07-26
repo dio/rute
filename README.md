@@ -24,8 +24,8 @@ Homebrew users can install and upgrade through
 [`dio/homebrew-tap`](https://github.com/dio/homebrew-tap):
 
 ```sh
-brew install --cask dio/tap/rute
-brew upgrade --cask rute
+brew install dio/tap/rute
+brew upgrade rute
 ```
 
 ## Local proxy
@@ -261,9 +261,10 @@ git push origin v0.1.0
 ```
 
 The tag starts the release workflow. It reruns the full test suite, builds the
-four release archives, embeds version metadata, generates per-archive SBOMs and
-SHA-256 checksums, publishes the GitHub release and `dio/tap/rute` cask, and
-records GitHub build provenance.
+four release archives, ad-hoc signs and verifies the macOS binaries, embeds
+version metadata, generates per-archive SBOMs and SHA-256 checksums, publishes
+the GitHub release and `dio/tap/rute` formula, and records GitHub build
+provenance.
 
 To verify a downloaded release with GitHub CLI:
 

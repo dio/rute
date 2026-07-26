@@ -25,6 +25,9 @@ builds:
       - darwin_arm64
       - linux_amd64_v1
       - linux_arm64
+    hooks:
+      post:
+        - './scripts/codesign-darwin.sh "{{ .Target }}" "{{ .Path }}"'
 
 archives:
   - ids:
@@ -35,6 +38,12 @@ archives:
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
       - README.md
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+  format: tar.gz
+  prefix_template: "{{ .ProjectName }}-{{ .Version }}/"
 
 sboms:
   - id: archives
@@ -59,25 +68,5 @@ changelog:
 
 release:
   prerelease: auto
-
-homebrew_casks:
-  - name: rute
-    binaries:
-      - rute
-    directory: Casks
-    homepage: https://github.com/dio/rute
-    description: Loopback OpenAI-compatible proxy backed by Codex OAuth
-    skip_upload: auto
-    repository:
-      owner: dio
-      name: homebrew-tap
-      branch: main
-      git:
-        url: ssh://git@github.com/dio/homebrew-tap.git
-        private_key: "{{ .Env.HOMEBREW_TAP_PRIVATE_KEY }}"
-    commit_author:
-      name: rute release bot
-      email: rute-release@users.noreply.github.com
-    commit_msg_template: "rute cask {{ .Tag }}"
 
 report_sizes: true
