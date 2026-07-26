@@ -9,13 +9,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
   release:
     name: Publish release
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 20
     permissions:
       contents: write
@@ -56,7 +56,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Homebrew formula
+        env:
           HOMEBREW_TAP_PRIVATE_KEY: ${{ secrets.HOMEBREW_TAP_PRIVATE_KEY }}
+        run: ./scripts/publish-homebrew-formula.sh "${{ github.ref_name }}"
 
       - name: Attest release artifacts
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0

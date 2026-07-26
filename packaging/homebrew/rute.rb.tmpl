@@ -1,0 +1,29 @@
+# typed: false
+# frozen_string_literal: true
+
+# This file is published by the rute release workflow. DO NOT EDIT.
+class Rute < Formula
+  desc "Loopback OpenAI-compatible proxy backed by Codex OAuth"
+  homepage "https://github.com/dio/rute"
+  url "https://github.com/dio/rute/releases/download/@TAG@/rute_@VERSION@_source.tar.gz"
+  sha256 "@SHA256@"
+
+  depends_on "go" => :build
+
+  def install
+    ldflags = %W[
+      -s -w
+      -X main.version=#{version}
+      -X main.commit=@COMMIT@
+      -X main.buildDate=@BUILD_DATE@
+    ].join(" ")
+
+    system "go", "build", *std_go_args(ldflags: ldflags, output: libexec/"rute-proxy"), "./cmd/proxy"
+    bin.write_exec_script libexec/"rute-proxy"
+    bin.install_symlink bin/"rute-proxy" => "rute"
+  end
+
+  test do
+    system bin/"rute", "version"
+  end
+end
