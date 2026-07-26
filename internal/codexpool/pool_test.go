@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,114 @@ import (
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/oauthpkce"
 )
+
+func TestPoolAuditsAccountLifecycle(t *testing.T) {
+	t.Parallel()
+
+	store, err := accountstore.NewFileStore(
+		filepath.Join(t.TempDir(), "state", "credentials.json"),
+	)
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	pool, err := New(context.Background(), store, codexauth.Config{
+		ClientID: "client",
+		TokenURL: "https://example.invalid/token",
+	}, nil)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	added, err := pool.Add(context.Background(), "personal", oauthpkce.TokenSet{
+		AccessToken:  "first-access",
+		RefreshToken: "first-refresh",
+	})
+	if err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := pool.Reauth(context.Background(), added.Name, oauthpkce.TokenSet{
+		AccessToken:  "second-access",
+		RefreshToken: "second-refresh",
+	}); err != nil {
+		t.Fatalf("reauthenticate account: %v", err)
+	}
+	if err := pool.Delete(context.Background(), added.Name); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+	events, err := store.AuditHistory(context.Background(), accountstore.AuditFilter{})
+	if err != nil {
+		t.Fatalf("read audit history: %v", err)
+	}
+	want := []accountstore.AuditAction{
+		accountstore.AuditAccountAdded,
+		accountstore.AuditAccountReauthenticated,
+		accountstore.AuditAccountRemoved,
+	}
+	if len(events) != len(want) {
+		t.Fatalf("event count = %d, want %d", len(events), len(want))
+	}
+	for index, action := range want {
+		if events[index].Action != action {
+			t.Errorf("event %d action = %q, want %q", index, events[index].Action, action)
+		}
+		if events[index].RecordID != added.ID {
+			t.Errorf("event %d record ID = %q, want %q", index, events[index].RecordID, added.ID)
+		}
+	}
+}
+
+func TestPoolKeepsCredentialMutationWhenAuditAppendFails(t *testing.T) {
+	t.Parallel()
+
+	store, err := accountstore.NewFileStore(
+		filepath.Join(t.TempDir(), "state", "credentials.json"),
+	)
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	var logs bytes.Buffer
+	pool, err := New(context.Background(), store, codexauth.Config{
+		ClientID: "client",
+		TokenURL: "https://example.invalid/token",
+	}, &logs)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	if _, err := pool.Add(context.Background(), "personal", oauthpkce.TokenSet{
+		AccessToken:  "first-access",
+		RefreshToken: "first-refresh",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	body, err := os.ReadFile(store.AuditPath())
+	if err != nil {
+		t.Fatalf("read audit history: %v", err)
+	}
+	body = []byte(strings.Replace(
+		string(body),
+		string(accountstore.AuditAccountAdded),
+		string(accountstore.AuditAccountRemoved),
+		1,
+	))
+	if err := os.WriteFile(store.AuditPath(), body, 0o600); err != nil {
+		t.Fatalf("corrupt audit history: %v", err)
+	}
+	if err := pool.Reauth(context.Background(), "personal", oauthpkce.TokenSet{
+		AccessToken:  "second-access",
+		RefreshToken: "second-refresh",
+	}); err != nil {
+		t.Fatalf("reauthenticate with corrupt audit history: %v", err)
+	}
+	accounts, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list accounts: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].RefreshToken != "second-refresh" {
+		t.Errorf("stored accounts = %+v", accounts)
+	}
+	if !strings.Contains(logs.String(), "credential change succeeded") {
+		t.Errorf("logs = %q, want audit coverage warning", logs.String())
+	}
+}
 
 func TestPoolBootstrapPersistsRotatedRefreshToken(t *testing.T) {
 	t.Parallel()
@@ -40,7 +150,12 @@ func TestPoolBootstrapPersistsRotatedRefreshToken(t *testing.T) {
 	))
 	defer tokenServer.Close()
 
-	store := accountstore.NewMemoryStore()
+	store, err := accountstore.NewFileStore(
+		filepath.Join(t.TempDir(), "state", "credentials.json"),
+	)
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
 	record := accountstore.Account{
 		ID:           "profile-1",
 		Name:         "personal",
@@ -75,6 +190,13 @@ func TestPoolBootstrapPersistsRotatedRefreshToken(t *testing.T) {
 	if lease.Token.AccessToken != "new-access" ||
 		lease.Token.AccountID != "upstream-1" {
 		t.Errorf("lease token = %v", lease.Token)
+	}
+	events, err := store.AuditHistory(context.Background(), accountstore.AuditFilter{})
+	if err != nil {
+		t.Fatalf("read audit history: %v", err)
+	}
+	if len(events) != 1 || events[0].Action != accountstore.AuditCredentialsRefreshed {
+		t.Errorf("audit events = %+v", events)
 	}
 }
 
@@ -145,7 +267,12 @@ func TestPoolPermanentRefreshFailureMarksReauthentication(t *testing.T) {
 	))
 	defer tokenServer.Close()
 
-	store := accountstore.NewMemoryStore()
+	store, err := accountstore.NewFileStore(
+		filepath.Join(t.TempDir(), "state", "credentials.json"),
+	)
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
 	if err := store.Put(context.Background(), accountstore.Account{
 		ID:           "profile-1",
 		Name:         "expired",
@@ -170,6 +297,13 @@ func TestPoolPermanentRefreshFailureMarksReauthentication(t *testing.T) {
 	}
 	if _, err := pool.Acquire(context.Background(), "session", nil); !errors.Is(err, ErrAuthenticationRequired) {
 		t.Errorf("acquire error = %v, want authentication required", err)
+	}
+	events, err := store.AuditHistory(context.Background(), accountstore.AuditFilter{})
+	if err != nil {
+		t.Fatalf("read audit history: %v", err)
+	}
+	if len(events) != 1 || events[0].Action != accountstore.AuditReauthRequired {
+		t.Errorf("audit events = %+v", events)
 	}
 }
 

@@ -30,6 +30,9 @@ type sessionConfig struct {
 	verifier         string
 	oauthConfig      oauth2.Config
 	httpClient       *http.Client
+	tokenExchanger   TokenExchanger
+	clientID         string
+	tokenURL         string
 	listener         net.Listener
 }
 
@@ -49,6 +52,9 @@ type Session struct {
 	verifier         string
 	oauthConfig      oauth2.Config
 	httpClient       *http.Client
+	tokenExchanger   TokenExchanger
+	clientID         string
+	tokenURL         string
 
 	server     *http.Server
 	results    chan callbackResult
@@ -72,6 +78,9 @@ func startSession(cfg sessionConfig) *Session {
 		verifier:         cfg.verifier,
 		oauthConfig:      cfg.oauthConfig,
 		httpClient:       cfg.httpClient,
+		tokenExchanger:   cfg.tokenExchanger,
+		clientID:         cfg.clientID,
+		tokenURL:         cfg.tokenURL,
 		results:          make(chan callbackResult, 1),
 		serveErrs:        make(chan error, 1),
 		done:             make(chan struct{}),
@@ -254,6 +263,24 @@ func (session *Session) deliver(result callbackResult) {
 }
 
 func (session *Session) exchange(ctx context.Context, code string) (TokenSet, error) {
+	if session.tokenExchanger != nil {
+		tokens, err := session.tokenExchanger.Exchange(ctx, session.httpClient, ExchangeRequest{
+			ClientID:     session.clientID,
+			TokenURL:     session.tokenURL,
+			Code:         code,
+			State:        session.state,
+			RedirectURI:  session.redirectURI,
+			CodeVerifier: session.verifier,
+		})
+		if err != nil {
+			var exchangeErr *TokenExchangeError
+			if errors.As(err, &exchangeErr) {
+				return TokenSet{}, exchangeErr
+			}
+			return TokenSet{}, &TokenExchangeError{cause: err}
+		}
+		return tokens, nil
+	}
 	exchangeCtx := context.WithValue(ctx, oauth2.HTTPClient, session.httpClient)
 	token, err := session.oauthConfig.Exchange(
 		exchangeCtx,

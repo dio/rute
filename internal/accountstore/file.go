@@ -73,8 +73,13 @@ func (store *FileStore) Put(ctx context.Context, account Account) error {
 				found = true
 				continue
 			}
-			if accounts[index].Name == account.Name {
-				return fmt.Errorf("accountstore: account name %q already exists", account.Name)
+			if accounts[index].Provider == account.Provider &&
+				accounts[index].Name == account.Name {
+				return fmt.Errorf(
+					"accountstore: %s account name %q already exists",
+					account.Provider,
+					account.Name,
+				)
 			}
 		}
 		if !found {
@@ -161,7 +166,7 @@ func readDiskFile(path string) ([]Account, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errors.New("accountstore: credential file contains trailing data")
 	}
-	if data.Version != currentVersion {
+	if data.Version != 1 && data.Version != currentVersion {
 		return nil, fmt.Errorf("accountstore: unsupported credential file version %d", data.Version)
 	}
 	ids := make(map[string]struct{}, len(data.Accounts))
@@ -174,11 +179,16 @@ func readDiskFile(path string) ([]Account, error) {
 		if _, exists := ids[normalized.ID]; exists {
 			return nil, fmt.Errorf("accountstore: duplicate account ID %q", normalized.ID)
 		}
-		if _, exists := names[normalized.Name]; exists {
-			return nil, fmt.Errorf("accountstore: duplicate account name %q", normalized.Name)
+		nameKey := normalized.Provider + "\x00" + normalized.Name
+		if _, exists := names[nameKey]; exists {
+			return nil, fmt.Errorf(
+				"accountstore: duplicate %s account name %q",
+				normalized.Provider,
+				normalized.Name,
+			)
 		}
 		ids[normalized.ID] = struct{}{}
-		names[normalized.Name] = struct{}{}
+		names[nameKey] = struct{}{}
 		data.Accounts[index] = normalized
 	}
 	sortAccounts(data.Accounts)

@@ -1,4 +1,4 @@
-// Package accountstore persists Codex refresh credentials for the local proxy.
+// Package accountstore persists OAuth refresh credentials for the local proxy.
 package accountstore
 
 import (
@@ -14,7 +14,12 @@ import (
 	"time"
 )
 
-const currentVersion = 1
+const currentVersion = 2
+
+const (
+	ProviderCodex  = "codex"
+	ProviderClaude = "claude"
+)
 
 var (
 	// ErrNotFound indicates that an account does not exist.
@@ -30,9 +35,10 @@ const (
 	StateReauthRequired State = "reauth_required"
 )
 
-// Account is one persisted Codex account. RefreshToken is always secret.
+// Account is one persisted provider account. RefreshToken is always secret.
 type Account struct {
 	ID           string    `json:"id"`
+	Provider     string    `json:"provider"`
 	Name         string    `json:"name"`
 	AccountID    string    `json:"account_id,omitempty"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
@@ -69,8 +75,15 @@ func ValidateName(name string) error {
 
 func normalizeAccount(account Account) (Account, error) {
 	account.ID = strings.TrimSpace(account.ID)
+	account.Provider = strings.TrimSpace(account.Provider)
 	account.Name = strings.TrimSpace(account.Name)
 	account.AccountID = strings.TrimSpace(account.AccountID)
+	if account.Provider == "" {
+		account.Provider = ProviderCodex
+	}
+	if account.Provider != ProviderCodex && account.Provider != ProviderClaude {
+		return Account{}, fmt.Errorf("accountstore: unsupported provider %q", account.Provider)
+	}
 	if account.ID == "" {
 		return Account{}, errors.New("accountstore: account ID is required")
 	}
@@ -140,8 +153,14 @@ func (store *MemoryStore) Put(ctx context.Context, account Account) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	for id, existing := range store.accounts {
-		if id != account.ID && existing.Name == account.Name {
-			return fmt.Errorf("accountstore: account name %q already exists", account.Name)
+		if id != account.ID &&
+			existing.Provider == account.Provider &&
+			existing.Name == account.Name {
+			return fmt.Errorf(
+				"accountstore: %s account name %q already exists",
+				account.Provider,
+				account.Name,
+			)
 		}
 	}
 	store.accounts[account.ID] = account

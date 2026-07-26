@@ -417,7 +417,9 @@ func TestModelsListsDefaultModel(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode models: %v", err)
 	}
-	if len(response.Data) != 1 || response.Data[0].ID != "gpt-test" {
+	if len(response.Data) != 2 ||
+		response.Data[0].ID != "codex/gpt-test" ||
+		response.Data[1].ID != "gpt-test" {
 		t.Errorf("models = %+v", response.Data)
 	}
 }

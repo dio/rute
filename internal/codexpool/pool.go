@@ -21,6 +21,7 @@ const (
 	refreshInterval      = 30 * time.Second
 	refreshConcurrency   = 2
 	persistRetryInterval = 30 * time.Second
+	auditWriteTimeout    = 5 * time.Second
 	defaultRefreshBefore = 5 * time.Minute
 	maxRefreshJitter     = 30 * time.Second
 )
@@ -54,6 +55,7 @@ type accountSnapshot struct {
 // Pool manages account selection, refreshing, and persistence.
 type Pool struct {
 	store      accountstore.Store
+	provider   string
 	authConfig codexauth.Config
 	stderr     io.Writer
 
@@ -71,8 +73,28 @@ func New(
 	authConfig codexauth.Config,
 	stderr io.Writer,
 ) (*Pool, error) {
+	return NewProvider(
+		ctx,
+		store,
+		accountstore.ProviderCodex,
+		authConfig,
+		stderr,
+	)
+}
+
+// NewProvider loads accounts belonging to provider from store.
+func NewProvider(
+	ctx context.Context,
+	store accountstore.Store,
+	provider string,
+	authConfig codexauth.Config,
+	stderr io.Writer,
+) (*Pool, error) {
 	if store == nil {
 		return nil, errors.New("codexpool: store is required")
+	}
+	if provider != accountstore.ProviderCodex && provider != accountstore.ProviderClaude {
+		return nil, fmt.Errorf("codexpool: unsupported provider %q", provider)
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -83,11 +105,15 @@ func New(
 	}
 	pool := &Pool{
 		store:      store,
+		provider:   provider,
 		authConfig: authConfig,
 		stderr:     stderr,
 		sessions:   make(map[string]sessionBinding),
 	}
 	for _, record := range records {
+		if record.Provider != provider {
+			continue
+		}
 		if record.RefreshToken == "" {
 			record.State = accountstore.StateReauthRequired
 			pool.accounts = append(pool.accounts, &account{record: record})
@@ -127,11 +153,13 @@ func NewEphemeral(
 	now := time.Now().UTC()
 	return &Pool{
 		store:      accountstore.NewMemoryStore(),
+		provider:   accountstore.ProviderCodex,
 		authConfig: authConfig,
 		stderr:     stderr,
 		accounts: []*account{{
 			record: accountstore.Account{
 				ID:           "environment",
+				Provider:     accountstore.ProviderCodex,
 				Name:         "environment",
 				AccountID:    token.AccountID,
 				RefreshToken: token.RefreshToken,
@@ -187,6 +215,7 @@ func (pool *Pool) Add(
 	now := time.Now().UTC()
 	record := accountstore.Account{
 		ID:           id,
+		Provider:     pool.provider,
 		Name:         name,
 		AccountID:    token.AccountID,
 		RefreshToken: token.RefreshToken,
@@ -197,6 +226,13 @@ func (pool *Pool) Add(
 	if err := pool.store.Put(ctx, record); err != nil {
 		return accountstore.Account{}, err
 	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountAdded,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 	pool.mu.Lock()
 	pool.accounts = append(pool.accounts, &account{
 		record:        record,
@@ -245,6 +281,13 @@ func (pool *Pool) Reauth(
 	if err := pool.store.Put(ctx, record); err != nil {
 		return err
 	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountReauthenticated,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 	pool.mu.Lock()
 	target.record = record
 	target.source = source
@@ -264,19 +307,26 @@ func (pool *Pool) Delete(ctx context.Context, name string) error {
 		pool.mu.Unlock()
 		return accountstore.ErrNotFound
 	}
-	id := target.record.ID
+	record := target.record
 	pool.mu.Unlock()
-	if err := pool.store.Delete(ctx, id); err != nil {
+	if err := pool.store.Delete(ctx, record.ID); err != nil {
 		return err
 	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountRemoved,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 	pool.mu.Lock()
 	for index, candidate := range pool.accounts {
-		if candidate.record.ID == id {
+		if candidate.record.ID == record.ID {
 			pool.accounts = append(pool.accounts[:index], pool.accounts[index+1:]...)
 			break
 		}
 	}
-	pool.unbindAccountLocked(id)
+	pool.unbindAccountLocked(record.ID)
 	pool.mu.Unlock()
 	return nil
 }
@@ -506,6 +556,13 @@ func (pool *Pool) persistToken(
 	item.storedRefresh = token.RefreshToken
 	item.dirty = false
 	pool.mu.Unlock()
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditCredentialsRefreshed,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
 }
 
 func (pool *Pool) markReauthRequired(ctx context.Context, item *account) {
@@ -526,7 +583,31 @@ func (pool *Pool) markReauthRequired(ctx context.Context, item *account) {
 				record.Name,
 				err,
 			)
+			return
 		}
+		pool.recordAudit(ctx, accountstore.AuditEvent{
+			Action:      accountstore.AuditReauthRequired,
+			Provider:    record.Provider,
+			RecordID:    record.ID,
+			AccountName: record.Name,
+			State:       record.State,
+		})
+	}
+}
+
+func (pool *Pool) recordAudit(ctx context.Context, event accountstore.AuditEvent) {
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	if err := accountstore.RecordAudit(auditCtx, pool.store, event); err != nil {
+		_, _ = fmt.Fprintf(
+			pool.stderr,
+			"rute proxy: credential change succeeded but could not append %q audit event "+
+				"for %s account %q: %v\n",
+			event.Action,
+			event.Provider,
+			event.AccountName,
+			err,
+		)
 	}
 }
 
@@ -684,12 +765,16 @@ func (pool *Pool) snapshotAccounts() []accountSnapshot {
 }
 
 func jitteredAuthConfig(config codexauth.Config, key string) codexauth.Config {
-	if config.RefreshBefore > 0 {
-		return config
+	refreshBefore := config.RefreshBefore
+	if refreshBefore <= 0 {
+		refreshBefore = defaultRefreshBefore
 	}
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(key))
 	jitter := time.Duration(hash.Sum32()%uint32(maxRefreshJitter/time.Second)) * time.Second
-	config.RefreshBefore = defaultRefreshBefore - jitter
+	if jitter >= refreshBefore {
+		jitter = refreshBefore / 2
+	}
+	config.RefreshBefore = refreshBefore - jitter
 	return config
 }

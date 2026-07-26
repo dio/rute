@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dio/rute/internal/accountstore"
 )
 
 func TestNormalizeListenAddress(t *testing.T) {
@@ -51,11 +54,25 @@ func TestParseOptionsCredentialStore(t *testing.T) {
 	if opts.credentialKind != "file" || opts.credentialFile != path {
 		t.Errorf("storage options = %q, %q", opts.credentialKind, opts.credentialFile)
 	}
+	if opts.modelsFile != "" {
+		t.Errorf("models file = %q, want empty", opts.modelsFile)
+	}
 	if _, err := parseOptions(
 		[]string{"-credential-store=keyring", "-credential-file=" + path},
 		new(bytes.Buffer),
 	); err == nil {
 		t.Fatal("credential-file with keyring succeeded")
+	}
+
+	opts, err = parseOptions(
+		[]string{"-models-file=/tmp/models.json"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse models file: %v", err)
+	}
+	if opts.modelsFile != "/tmp/models.json" {
+		t.Errorf("models file = %q", opts.modelsFile)
 	}
 }
 
@@ -69,14 +86,96 @@ func TestParseAccountOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse account options: %v", err)
 	}
-	if opts.action != "add" || opts.name != "personal" || opts.credentialKind != "file" {
+	if opts.action != "add" ||
+		opts.provider != "codex" ||
+		opts.name != "personal" ||
+		opts.credentialKind != "file" {
 		t.Errorf("options = %+v", opts)
+	}
+	opts, err = parseAccountOptions(
+		[]string{"add", "-provider=claude", "-name=personal"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse Claude account options: %v", err)
+	}
+	if opts.provider != "claude" {
+		t.Errorf("provider = %q, want claude", opts.provider)
+	}
+	opts, err = parseAccountOptions(
+		[]string{"history", "-provider=claude", "-output=json", "personal"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse history options: %v", err)
+	}
+	if opts.provider != "claude" || opts.name != "personal" || opts.output != "json" {
+		t.Errorf("history options = %+v", opts)
 	}
 	if _, err := parseAccountOptions(
 		[]string{"remove", "bad name"},
 		new(bytes.Buffer),
 	); err == nil {
 		t.Fatal("invalid account name succeeded")
+	}
+}
+
+func TestRunAccountHistoryFileStore(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state", "credentials.json")
+	store, err := accountstore.NewFileStore(path)
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	for _, event := range []accountstore.AuditEvent{
+		{
+			Action:      accountstore.AuditAccountAdded,
+			Provider:    accountstore.ProviderCodex,
+			RecordID:    "codex-record",
+			AccountName: "personal",
+			State:       accountstore.StateActive,
+		},
+		{
+			Action:      accountstore.AuditAccountAdded,
+			Provider:    accountstore.ProviderClaude,
+			RecordID:    "claude-record",
+			AccountName: "work",
+			State:       accountstore.StateActive,
+		},
+	} {
+		if err := store.RecordAudit(context.Background(), event); err != nil {
+			t.Fatalf("record audit event: %v", err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	err = run(
+		context.Background(),
+		[]string{
+			"account",
+			"history",
+			"-provider=codex",
+			"-output=json",
+			"-credential-store=file",
+			"-credential-file=" + path,
+			"personal",
+		},
+		&stdout,
+		new(bytes.Buffer),
+		func(string) string { return "" },
+	)
+	if err != nil {
+		t.Fatalf("run account history: %v", err)
+	}
+	var events []accountstore.AuditEvent
+	if err := json.Unmarshal(stdout.Bytes(), &events); err != nil {
+		t.Fatalf("decode history output: %v", err)
+	}
+	if len(events) != 1 ||
+		events[0].Provider != accountstore.ProviderCodex ||
+		events[0].AccountName != "personal" {
+		t.Errorf("history events = %+v", events)
 	}
 }
 
@@ -99,7 +198,7 @@ func TestRunAccountListFileStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run account list: %v", err)
 	}
-	if got := stdout.String(); got != "No Codex accounts configured.\n" {
+	if got := stdout.String(); got != "No accounts configured.\n" {
 		t.Errorf("stdout = %q", got)
 	}
 }

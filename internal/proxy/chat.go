@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/dio/rute/internal/accountstore"
 )
 
 type chatState struct {
@@ -53,7 +55,34 @@ func (handler *Handler) handleChatCompletions(writer http.ResponseWriter, reques
 	}
 	stream, _ := body["stream"].(bool)
 	sessionID := requestSessionID(request)
-	responsesBody, model, err := chatToResponses(body, handler.config.DefaultModel, sessionID)
+	requestedModel, _ := body["model"].(string)
+	resolution, err := handler.config.ModelCatalog.Resolve(
+		requestedModel,
+		handler.config.DefaultModel,
+	)
+	if err != nil {
+		writeAPIError(
+			writer,
+			http.StatusBadRequest,
+			err.Error(),
+			"invalid_request_error",
+			"invalid_model",
+		)
+		return
+	}
+	body["model"] = resolution.UpstreamModel
+	if resolution.Provider == accountstore.ProviderClaude {
+		handler.handleClaudeChatBody(
+			writer,
+			request,
+			body,
+			resolution.PublicModel,
+			sessionID,
+			stream,
+		)
+		return
+	}
+	responsesBody, _, err := chatToResponses(body, handler.config.DefaultModel, sessionID)
 	if err != nil {
 		writeAPIError(
 			writer,
@@ -77,7 +106,7 @@ func (handler *Handler) handleChatCompletions(writer http.ResponseWriter, reques
 		return
 	}
 
-	state := newChatState(model)
+	state := newChatState(resolution.PublicModel)
 	if stream {
 		handler.streamChat(writer, request, response.Body, state)
 		return
