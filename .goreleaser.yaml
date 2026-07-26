@@ -60,4 +60,24 @@ changelog:
 release:
   prerelease: auto
 
+homebrew_casks:
+  - name: rute
+    binaries:
+      - rute
+    directory: Casks
+    homepage: https://github.com/dio/rute
+    description: Loopback OpenAI-compatible proxy backed by Codex OAuth
+    skip_upload: auto
+    repository:
+      owner: dio
+      name: homebrew-tap
+      branch: main
+      git:
+        url: ssh://git@github.com/dio/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_PRIVATE_KEY }}"
+    commit_author:
+      name: rute release bot
+      email: rute-release@users.noreply.github.com
+    commit_msg_template: "rute cask {{ .Tag }}"
+
 report_sizes: true
