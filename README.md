@@ -66,6 +66,10 @@ On macOS, create a LaunchAgent at
 `/absolute/path/to/rute` with the output of `command -v rute`, and replace
 `/Users/YOU` with your home directory:
 
+```sh
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/rute"
+```
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,10 +91,9 @@ On macOS, create a LaunchAgent at
 </plist>
 ```
 
-Create the log directory and load the agent:
+Load the agent:
 
 ```sh
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/rute"
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/io.github.dio.rute.plist"
 launchctl print "gui/$(id -u)/io.github.dio.rute"
 ```
