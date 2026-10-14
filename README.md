@@ -55,6 +55,34 @@ rejects wildcard and non-loopback addresses. This command is intended as a
 single-user local compatibility layer, not a multi-user gateway or virtual-key
 service.
 
+### Access from other devices with Tailscale
+
+Keep `rute` bound to loopback and let Tailscale Serve provide HTTPS access to
+devices in your tailnet. With Tailscale installed and signed in on the host:
+
+```sh
+tailscale serve --bg --set-path=/rute http://127.0.0.1:20128
+tailscale serve status
+```
+
+Tailscale prints the host's tailnet URL. The proxy is available there under
+`/rute`, for example:
+
+```text
+https://<host>.<tailnet>.ts.net/rute
+```
+
+Serve forwards requests over the host's loopback interface; `rute` does not
+listen on the network interface. This Serve configuration is tailnet-only, so
+clients must be signed in to the same tailnet and allowed by its access
+controls. Do not expose this unauthenticated single-user proxy publicly with
+Tailscale Funnel.
+
+On macOS, run `rute serve -listen=127.0.0.1:20128` from a LaunchAgent to keep
+the proxy running in the background and start it at login. Tailscale Serve
+forwards to that local listener; it does not start `rute` itself. Check the
+LaunchAgent logs and `tailscale serve status` when troubleshooting.
+
 ### Credential storage and accounts
 
 Native key storage is the default and never silently falls back to plaintext:
