@@ -58,7 +58,72 @@ service.
 ### Access from other devices with Tailscale
 
 Keep `rute` bound to loopback and let Tailscale Serve provide HTTPS access to
-devices in your tailnet. With Tailscale installed and signed in on the host:
+devices in your tailnet. First configure `rute` to stay running in the
+background.
+
+On macOS, create a LaunchAgent at
+`~/Library/LaunchAgents/io.github.dio.rute.plist`. Replace
+`/absolute/path/to/rute` with the output of `command -v rute`, and replace
+`/Users/YOU` with your home directory:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.github.dio.rute</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/to/rute</string>
+    <string>serve</string>
+    <string>-listen=127.0.0.1:20128</string>
+    <string>-credential-store=file</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/rute/proxy.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/rute/proxy.error.log</string>
+</dict>
+</plist>
+```
+
+Create the log directory and load the agent:
+
+```sh
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/rute"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/io.github.dio.rute.plist"
+launchctl print "gui/$(id -u)/io.github.dio.rute"
+```
+
+On Linux with systemd, create `~/.config/systemd/user/rute.service`. Replace
+`/absolute/path/to/rute` with the output of `command -v rute`:
+
+```ini
+[Unit]
+Description=rute local compatibility proxy
+
+[Service]
+ExecStart=/absolute/path/to/rute serve -listen=127.0.0.1:20128 -credential-store=file
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Enable and start the user service:
+
+```sh
+mkdir -p "$HOME/.config/systemd/user"
+systemctl --user daemon-reload
+systemctl --user enable --now rute.service
+systemctl --user status rute.service
+```
+
+To keep a systemd user service running after logout and start it at boot,
+enable lingering for your account with `sudo loginctl enable-linger "$USER"`.
+
+With Tailscale installed and signed in on the host, configure Serve:
 
 ```sh
 tailscale serve --bg --set-path=/rute http://127.0.0.1:20128
@@ -76,12 +141,10 @@ Serve forwards requests over the host's loopback interface; `rute` does not
 listen on the network interface. This Serve configuration is tailnet-only, so
 clients must be signed in to the same tailnet and allowed by its access
 controls. Do not expose this unauthenticated single-user proxy publicly with
-Tailscale Funnel.
-
-On macOS, run `rute serve -listen=127.0.0.1:20128` from a LaunchAgent to keep
-the proxy running in the background and start it at login. Tailscale Serve
-forwards to that local listener; it does not start `rute` itself. Check the
-LaunchAgent logs and `tailscale serve status` when troubleshooting.
+Tailscale Funnel. The service manager starts `rute`; Tailscale Serve only
+forwards traffic to it. Check the LaunchAgent logs or
+`journalctl --user -u rute.service`, along with `tailscale serve status`,
+when troubleshooting.
 
 ### Credential storage and accounts
 
