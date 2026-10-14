@@ -1,6 +1,6 @@
 module github.com/dio/rute
 
-go 1.26.5
+go 1.26.9
 
 require (
 	github.com/coder/websocket v1.8.15
@@ -11,5 +11,5 @@ require (
 
 require (
 	github.com/danieljoos/wincred v1.2.3 // indirect
-	github.com/godbus/dbus/v5 v5.2.2 // indirect
+	github.com/godbus/dbus/v5 v5.2.4 // indirect
 )
