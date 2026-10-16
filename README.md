@@ -212,6 +212,16 @@ account. An account that needs login or is temporarily rate-limited is excluded
 until it recovers. Only authorization and quota failures fail over to another
 account; upstream `5xx` responses are not replayed.
 
+When every usable Claude account is rate-limited, both `/v1/messages` and
+Claude requests to `/v1/chat/completions` return HTTP `429` with
+`error.type: rate_limit_error` and a `Retry-After` header. Requests during the
+cooldown return the same status without contacting Claude again. The retry
+interval is the proxy's earliest account cooldown, not a guarantee that the
+upstream quota will have reset. If the upstream supplies no reset hint, rute
+uses a one-minute cooldown. Authentication or other availability failures
+remain distinct from rate limiting. Successful OAuth login does not guarantee
+that the account currently has inference capacity.
+
 On a fresh installation, running `rute` starts a Codex login. To start with
 Claude instead, add a Claude account first:
 

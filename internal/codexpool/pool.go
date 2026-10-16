@@ -33,11 +33,12 @@ type Lease struct {
 }
 
 type account struct {
-	record        accountstore.Account
-	source        *codexauth.Source
-	storedRefresh string
-	dirty         bool
-	cooldownUntil time.Time
+	record              accountstore.Account
+	source              *codexauth.Source
+	storedRefresh       string
+	dirty               bool
+	cooldownUntil       time.Time
+	cooldownRateLimited bool
 }
 
 type sessionBinding struct {
@@ -446,7 +447,7 @@ func (pool *Pool) ForceRefresh(ctx context.Context, id string) (Lease, error) {
 
 // MarkRateLimited cools down an account and unbinds its sessions.
 func (pool *Pool) MarkRateLimited(id string, until time.Time) {
-	pool.setCooldown(id, until)
+	pool.setCooldownReason(id, until, true)
 }
 
 // MarkAuthorizationFailure applies a short cooldown after a refreshed token is
@@ -612,6 +613,10 @@ func (pool *Pool) recordAudit(ctx context.Context, event accountstore.AuditEvent
 }
 
 func (pool *Pool) setCooldown(id string, until time.Time) {
+	pool.setCooldownReason(id, until, false)
+}
+
+func (pool *Pool) setCooldownReason(id string, until time.Time, rateLimited bool) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	item := pool.accountByIDLocked(id)
@@ -620,6 +625,7 @@ func (pool *Pool) setCooldown(id string, until time.Time) {
 	}
 	if until.After(item.cooldownUntil) {
 		item.cooldownUntil = until
+		item.cooldownRateLimited = rateLimited
 	}
 	pool.unbindAccountLocked(id)
 }
@@ -645,6 +651,7 @@ func (pool *Pool) selectAccount(
 	}
 	var earliest time.Time
 	reauthCount := 0
+	rateLimitedCount := 0
 	for offset := range pool.accounts {
 		index := (pool.rr + offset) % len(pool.accounts)
 		item := pool.accounts[index]
@@ -653,6 +660,9 @@ func (pool *Pool) selectAccount(
 			continue
 		}
 		if now.Before(item.cooldownUntil) {
+			if item.cooldownRateLimited {
+				rateLimitedCount++
+			}
 			if earliest.IsZero() || item.cooldownUntil.Before(earliest) {
 				earliest = item.cooldownUntil
 			}
@@ -673,7 +683,10 @@ func (pool *Pool) selectAccount(
 	if reauthCount == len(pool.accounts) {
 		return nil, ErrAuthenticationRequired
 	}
-	return nil, &UnavailableError{RetryAt: earliest}
+	return nil, &UnavailableError{
+		RetryAt:     earliest,
+		RateLimited: rateLimitedCount > 0 && rateLimitedCount+reauthCount == len(pool.accounts),
+	}
 }
 
 func (pool *Pool) eligibleLocked(
