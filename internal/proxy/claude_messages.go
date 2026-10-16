@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexauth"
@@ -270,6 +273,12 @@ func writeClaudeError(writer http.ResponseWriter, status int, message, errorType
 }
 
 func (handler *Handler) writeClaudeProxyError(writer http.ResponseWriter, err error) {
+	if setRateLimitRetryAfter(writer, err) {
+		writeClaudeError(writer, http.StatusTooManyRequests,
+			"All Claude accounts are rate-limited; retry after the indicated cooldown",
+			"rate_limit_error")
+		return
+	}
 	switch {
 	case errors.Is(err, codexpool.ErrAuthenticationRequired),
 		errors.Is(err, codexauth.ErrReauthenticationRequired):
@@ -294,4 +303,17 @@ func (handler *Handler) writeClaudeProxyError(writer http.ResponseWriter, err er
 			"api_error",
 		)
 	}
+}
+
+// setRateLimitRetryAfter reports pool-wide rate limiting without exposing upstream bodies.
+func setRateLimitRetryAfter(writer http.ResponseWriter, err error) bool {
+	var unavailable *codexpool.UnavailableError
+	if !errors.As(err, &unavailable) || !unavailable.RateLimited {
+		return false
+	}
+	if !unavailable.RetryAt.IsZero() {
+		seconds := max(1, int(math.Ceil(time.Until(unavailable.RetryAt).Seconds())))
+		writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
+	return true
 }

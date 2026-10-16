@@ -17,6 +17,8 @@ var (
 // UnavailableError records when the earliest account cooldown ends.
 type UnavailableError struct {
 	RetryAt time.Time
+	// RateLimited is true when every usable account is cooling down after a 429.
+	RateLimited bool
 }
 
 func (err *UnavailableError) Error() string {

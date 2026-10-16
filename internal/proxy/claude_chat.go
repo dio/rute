@@ -815,6 +815,12 @@ func claudeChatUpstreamError(response *http.Response) apiError {
 }
 
 func writeProxyErrorForProvider(writer http.ResponseWriter, err error, provider string) {
+	if setRateLimitRetryAfter(writer, err) {
+		writeAPIError(writer, http.StatusTooManyRequests,
+			"All "+provider+" accounts are rate-limited; retry after the indicated cooldown",
+			"rate_limit_error", "rate_limit_exceeded")
+		return
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return
