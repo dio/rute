@@ -70,7 +70,11 @@ func (store *KeyringStore) List(ctx context.Context) ([]Account, error) {
 				err,
 			)
 		}
-		accounts[index].RefreshToken = token
+		if accounts[index].AuthMode == AuthModeAPIKey {
+			accounts[index].APIKey = token
+		} else {
+			accounts[index].RefreshToken = token
+		}
 	}
 	return accounts, ctx.Err()
 }
@@ -81,8 +85,9 @@ func (store *KeyringStore) Put(ctx context.Context, account Account) error {
 	if err != nil {
 		return err
 	}
-	if account.RefreshToken == "" {
-		return errors.New("accountstore: refresh token is required for keyring storage")
+	secret := account.Secret()
+	if secret == "" {
+		return errors.New("accountstore: account secret is required for keyring storage")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -99,11 +104,12 @@ func (store *KeyringStore) Put(ctx context.Context, account Account) error {
 		}
 	}
 	service := keyringService(account.Provider)
-	if err := store.keyring.Set(service, account.ID, account.RefreshToken); err != nil {
+	if err := store.keyring.Set(service, account.ID, secret); err != nil {
 		return fmt.Errorf("accountstore: write native keyring: %w", err)
 	}
 	metadata := account
 	metadata.RefreshToken = ""
+	metadata.APIKey = ""
 	if err := store.manifest.Put(ctx, metadata); err != nil {
 		if !wasPresent {
 			_ = store.keyring.Delete(service, account.ID)

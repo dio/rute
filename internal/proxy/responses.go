@@ -57,7 +57,8 @@ func (handler *Handler) handleResponses(writer http.ResponseWriter, request *htt
 		)
 		return
 	}
-	if resolution.Provider != accountstore.ProviderCodex {
+	if resolution.Provider != accountstore.ProviderCodex &&
+		resolution.Provider != accountstore.ProviderCommandCode {
 		writeAPIError(
 			writer,
 			http.StatusBadRequest,
@@ -68,21 +69,29 @@ func (handler *Handler) handleResponses(writer http.ResponseWriter, request *htt
 		return
 	}
 	body["model"] = resolution.UpstreamModel
-	normalized, err := normalizeResponses(body, handler.config.DefaultModel, sessionID)
-	if err != nil {
-		writeAPIError(
-			writer,
-			http.StatusBadRequest,
-			err.Error(),
-			"invalid_request_error",
-			"invalid_request",
+	var response *http.Response
+	if resolution.Provider == accountstore.ProviderCommandCode {
+		response, err = handler.commandCodeUpstreamJSON(
+			request.Context(),
+			"responses",
+			resolution.UpstreamModel,
+			body,
+			request.Header,
+			sessionID,
 		)
-		return
+	} else {
+		var normalized map[string]any
+		normalized, err = normalizeResponses(body, handler.config.DefaultModel, sessionID)
+		if err == nil {
+			response, err = handler.upstream(request.Context(), "responses", normalized, sessionID)
+		}
 	}
-
-	response, err := handler.upstream(request.Context(), "responses", normalized, sessionID)
 	if err != nil {
-		writeProxyError(writer, err)
+		if resolution.Provider == accountstore.ProviderCommandCode {
+			writeProxyErrorForProvider(writer, err, commandCodeLabel)
+		} else {
+			writeProxyError(writer, err)
+		}
 		return
 	}
 	defer response.Body.Close()

@@ -120,6 +120,45 @@ func TestParseAccountOptions(t *testing.T) {
 	}
 }
 
+func TestParseAccountOptionsCommandCode(t *testing.T) {
+	t.Parallel()
+
+	opts, err := parseAccountOptions(
+		[]string{"add", "-provider=commandcode", "-name=work", "-api-key=secret"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse api-key options: %v", err)
+	}
+	if opts.provider != "commandcode" || opts.apiKey != "secret" {
+		t.Errorf("options = %+v", opts)
+	}
+
+	opts, err = parseAccountOptions(
+		[]string{"add", "-provider=commandcode", "-name=work"},
+		new(bytes.Buffer),
+	)
+	if err != nil {
+		t.Fatalf("parse browser-login options: %v", err)
+	}
+	if opts.provider != "commandcode" || opts.apiKey != "" || opts.apiKeyEnv != "" {
+		t.Errorf("options = %+v", opts)
+	}
+
+	if _, err := parseAccountOptions(
+		[]string{"add", "-provider=codex", "-name=work", "-api-key=secret"},
+		new(bytes.Buffer),
+	); err == nil {
+		t.Fatal("api key accepted for the codex provider")
+	}
+	if _, err := parseAccountOptions(
+		[]string{"add", "-provider=commandcode", "-name=work", "-api-key=a", "-api-key-env=B"},
+		new(bytes.Buffer),
+	); err == nil {
+		t.Fatal("both -api-key and -api-key-env were accepted")
+	}
+}
+
 func TestRunAccountHistoryFileStore(t *testing.T) {
 	t.Parallel()
 

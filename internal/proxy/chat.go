@@ -82,6 +82,23 @@ func (handler *Handler) handleChatCompletions(writer http.ResponseWriter, reques
 		)
 		return
 	}
+	if resolution.Provider == accountstore.ProviderCommandCode {
+		response, err := handler.commandCodeUpstreamJSON(
+			request.Context(),
+			"chat_completions",
+			resolution.UpstreamModel,
+			body,
+			request.Header,
+			sessionID,
+		)
+		if err != nil {
+			writeProxyErrorForProvider(writer, err, commandCodeLabel)
+			return
+		}
+		defer func() { _ = response.Body.Close() }()
+		handler.writePassthroughResponse(writer, request, response)
+		return
+	}
 	responsesBody, _, err := chatToResponses(body, handler.config.DefaultModel, sessionID)
 	if err != nil {
 		writeAPIError(

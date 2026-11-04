@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/modelcatalog"
 )
@@ -222,8 +223,14 @@ func TestModelMappingRoutesChatToClaude(t *testing.T) {
 			DefaultModel:      "gpt-test",
 			ModelCatalog:      catalog,
 		},
-		&staticCredentials{token: codexauth.Token{AccessToken: "codex-access"}},
-		&staticCredentials{token: codexauth.Token{AccessToken: "claude-access"}},
+		map[string]CredentialSource{
+			accountstore.ProviderCodex: &staticCredentials{
+				token: codexauth.Token{AccessToken: "codex-access"},
+			},
+			accountstore.ProviderClaude: &staticCredentials{
+				token: codexauth.Token{AccessToken: "claude-access"},
+			},
+		},
 	)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -272,11 +279,13 @@ func newClaudeTestHandler(t *testing.T, upstreamURL string) *Handler {
 			ClaudeUpstreamURL: upstreamURL + "?beta=true",
 			DefaultModel:      "gpt-test",
 		},
-		&staticCredentials{
-			token: codexauth.Token{AccessToken: "codex-access"},
-		},
-		&staticCredentials{
-			token: codexauth.Token{AccessToken: "claude-access"},
+		map[string]CredentialSource{
+			accountstore.ProviderCodex: &staticCredentials{
+				token: codexauth.Token{AccessToken: "codex-access"},
+			},
+			accountstore.ProviderClaude: &staticCredentials{
+				token: codexauth.Token{AccessToken: "claude-access"},
+			},
 		},
 	)
 	if err != nil {

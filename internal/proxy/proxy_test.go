@@ -436,7 +436,7 @@ func TestModelsListsDefaultModel(t *testing.T) {
 func newTestHandler(
 	t *testing.T,
 	upstreamURL string,
-	credentials credentialSource,
+	credentials CredentialSource,
 ) *Handler {
 	t.Helper()
 	handler, err := New(Config{

@@ -27,6 +27,7 @@ import (
 	"github.com/dio/rute/internal/claudeauth"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/commandcodeauth"
 	"github.com/dio/rute/internal/idle"
 	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/internal/modelcatalog"
@@ -144,6 +145,8 @@ type accountOptions struct {
 	provider       string
 	name           string
 	output         string
+	apiKey         string
+	apiKeyEnv      string
 	loginTimeout   time.Duration
 	credentialKind string
 	credentialFile string
@@ -197,10 +200,13 @@ func run(
 		return err
 	}
 	if len(args) > 0 && args[0] == "account" {
-		return runAccount(ctx, args[1:], stdout, stderr)
+		return runAccount(ctx, args[1:], stdout, stderr, getenv)
 	}
 	if len(args) > 0 && args[0] == "bench" {
 		return runBench(ctx, args[1:], stdout, stderr, getenv)
+	}
+	if len(args) > 0 && args[0] == "cmd" {
+		return runLaunchCommandCode(ctx, args[1:], stderr, getenv)
 	}
 	if len(args) > 0 && (args[0] == accountstore.ProviderClaude || args[0] == accountstore.ProviderCodex) {
 		return runLaunch(ctx, args[0], args[1:], stderr, getenv)
@@ -259,6 +265,7 @@ func runServe(
 	}
 	var codexCredentials *codexpool.Pool
 	var claudeCredentials *codexpool.Pool
+	var commandCodeCredentials *codexpool.Pool
 	if envTokens.AccessToken != "" {
 		codexCredentials, err = codexpool.NewEphemeral(authConfig, envTokens, stderr)
 		if err != nil {
@@ -285,6 +292,16 @@ func runServe(
 			store,
 			accountstore.ProviderClaude,
 			claudeauth.Config(),
+			stderr,
+		)
+		if err != nil {
+			return storageHint(opts.credentialKind, err)
+		}
+		commandCodeCredentials, err = codexpool.NewProvider(
+			ctx,
+			store,
+			accountstore.ProviderCommandCode,
+			codexauth.Config{},
 			stderr,
 		)
 		if err != nil {
@@ -326,6 +343,25 @@ func runServe(
 				)
 			}
 		}
+		if len(commandCodeCredentials.Accounts()) > 0 {
+			if err := commandCodeCredentials.Bootstrap(ctx); err != nil {
+				_, _ = fmt.Fprintf(
+					stderr,
+					"rute proxy: Command Code credentials are not currently usable; "+
+						"proxy will remain available: %v\n",
+					err,
+				)
+			}
+		}
+	}
+	credentialPools := map[string]*codexpool.Pool{
+		accountstore.ProviderCodex: codexCredentials,
+	}
+	if claudeCredentials != nil {
+		credentialPools[accountstore.ProviderClaude] = claudeCredentials
+	}
+	if commandCodeCredentials != nil {
+		credentialPools[accountstore.ProviderCommandCode] = commandCodeCredentials
 	}
 
 	var routing *routingfile.File
@@ -362,12 +398,16 @@ func runServe(
 		metrics = sinks
 	}
 	activity := idle.New()
+	sources := make(map[string]proxy.CredentialSource, len(credentialPools))
+	for provider, pool := range credentialPools {
+		sources[provider] = pool
+	}
 	handler, err := proxy.NewMulti(proxy.Config{
 		DefaultModel: opts.defaultModel,
 		ModelCatalog: catalog,
 		Metrics:      metrics,
 		Log:          log.New(stderr, "rute proxy: ", 0),
-	}, codexCredentials, claudeCredentials)
+	}, sources)
 	if err != nil {
 		return err
 	}
@@ -384,14 +424,10 @@ func runServe(
 		if err != nil {
 			return fmt.Errorf("admin-listen: %w", err)
 		}
-		pools := map[string]*codexpool.Pool{accountstore.ProviderCodex: codexCredentials}
-		if claudeCredentials != nil {
-			pools[accountstore.ProviderClaude] = claudeCredentials
-		}
 		adminHandler, err := admin.New(admin.Config{
 			Version:      version,
 			Started:      time.Now(),
-			Pools:        pools,
+			Pools:        credentialPools,
 			Calls:        calls,
 			Prices:       pricing.NewFile(opts.prices),
 			Routing:      routing,
@@ -415,12 +451,12 @@ func runServe(
 
 	managerCtx, cancelManager := context.WithCancel(ctx)
 	var managerWait sync.WaitGroup
-	managerWait.Go(func() {
-		codexCredentials.Run(managerCtx)
-	})
-	if claudeCredentials != nil {
+	for _, pool := range credentialPools {
+		if pool == nil {
+			continue
+		}
 		managerWait.Go(func() {
-			claudeCredentials.Run(managerCtx)
+			pool.Run(managerCtx)
 		})
 	}
 	if calls != nil {
@@ -533,6 +569,7 @@ func runAccount(
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
+	getenv func(string) string,
 ) error {
 	opts, err := parseAccountOptions(args, stderr)
 	if err != nil {
@@ -544,6 +581,24 @@ func runAccount(
 	store, err := openStore(opts.credentialKind, opts.credentialFile)
 	if err != nil {
 		return err
+	}
+	apiKey := strings.TrimSpace(opts.apiKey)
+	if apiKey == "" && opts.apiKeyEnv != "" {
+		apiKey = strings.TrimSpace(getenv(opts.apiKeyEnv))
+		if apiKey == "" {
+			return fmt.Errorf("environment variable %s is empty or unset", opts.apiKeyEnv)
+		}
+	}
+	var commandCodeAccountID string
+	if apiKey == "" &&
+		(opts.action == "add" || opts.action == "reauth") &&
+		opts.provider == accountstore.ProviderCommandCode {
+		credentials, err := commandCodeLogin(ctx, opts.loginTimeout, stderr)
+		if err != nil {
+			return err
+		}
+		apiKey = strings.TrimSpace(credentials.APIKey)
+		commandCodeAccountID = credentials.UserID
 	}
 
 	switch opts.action {
@@ -598,6 +653,7 @@ func runAccount(
 		providers := []string{
 			accountstore.ProviderCodex,
 			accountstore.ProviderClaude,
+			accountstore.ProviderCommandCode,
 		}
 		if opts.provider != "" {
 			providers = []string{opts.provider}
@@ -642,6 +698,19 @@ func runAccount(
 		if err != nil {
 			return storageHint(opts.credentialKind, err)
 		}
+		if apiKey != "" {
+			account, err := pool.AddAPIKey(ctx, opts.name, apiKey, commandCodeAccountID)
+			if err != nil {
+				return storageHint(opts.credentialKind, err)
+			}
+			_, err = fmt.Fprintf(
+				stdout,
+				"Added %s account %q.\n",
+				providerDisplayName(opts.provider),
+				account.Name,
+			)
+			return err
+		}
 		tokens, err := login(ctx, opts.provider, opts.loginTimeout, stderr)
 		if err != nil {
 			return err
@@ -661,6 +730,18 @@ func runAccount(
 		pool, err := newProviderPool(ctx, store, opts.provider, stderr)
 		if err != nil {
 			return storageHint(opts.credentialKind, err)
+		}
+		if apiKey != "" {
+			if err := pool.SetAPIKey(ctx, opts.name, apiKey, commandCodeAccountID); err != nil {
+				return storageHint(opts.credentialKind, err)
+			}
+			_, err = fmt.Fprintf(
+				stdout,
+				"Reauthenticated %s account %q.\n",
+				providerDisplayName(opts.provider),
+				opts.name,
+			)
+			return err
 		}
 		tokens, err := login(ctx, opts.provider, opts.loginTimeout, stderr)
 		if err != nil {
@@ -712,6 +793,8 @@ func newProviderPool(
 		}
 	case accountstore.ProviderClaude:
 		config = claudeauth.Config()
+	case accountstore.ProviderCommandCode:
+		config = codexauth.Config{}
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", provider)
 	}
@@ -719,10 +802,14 @@ func newProviderPool(
 }
 
 func providerDisplayName(provider string) string {
-	if provider == accountstore.ProviderClaude {
+	switch provider {
+	case accountstore.ProviderClaude:
 		return "Claude"
+	case accountstore.ProviderCommandCode:
+		return "Command Code"
+	default:
+		return "Codex"
 	}
-	return "Codex"
 }
 
 func parseOptions(args []string, stderr io.Writer) (options, error) {
@@ -906,9 +993,9 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 	}
 	flags := flag.NewFlagSet("rute-proxy account "+opts.action, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	providerHelp := "account provider: codex or claude (default: codex)"
+	providerHelp := "account provider: codex, claude, or commandcode (default: codex)"
 	if opts.action == "list" || opts.action == "history" {
-		providerHelp = "account provider filter: codex or claude (default: all)"
+		providerHelp = "account provider filter: codex, claude, or commandcode (default: all)"
 	}
 	flags.StringVar(
 		&opts.provider,
@@ -925,6 +1012,18 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			"login-timeout",
 			defaultLoginTimeout,
 			"maximum time to complete browser login",
+		)
+		flags.StringVar(
+			&opts.apiKey,
+			"api-key",
+			"",
+			"API key for an API-key provider (commandcode); omit to log in via the browser",
+		)
+		flags.StringVar(
+			&opts.apiKeyEnv,
+			"api-key-env",
+			"",
+			"environment variable holding the API key (commandcode)",
 		)
 	}
 	if opts.action == "history" {
@@ -976,8 +1075,19 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 	}
 	if opts.provider != "" &&
 		opts.provider != accountstore.ProviderCodex &&
-		opts.provider != accountstore.ProviderClaude {
-		return accountOptions{}, errors.New("provider must be codex or claude")
+		opts.provider != accountstore.ProviderClaude &&
+		opts.provider != accountstore.ProviderCommandCode {
+		return accountOptions{}, errors.New("provider must be codex, claude, or commandcode")
+	}
+	if opts.apiKey != "" && opts.apiKeyEnv != "" {
+		return accountOptions{}, errors.New("use either -api-key or -api-key-env, not both")
+	}
+	if (opts.action == "add" || opts.action == "reauth") &&
+		(opts.apiKey != "" || opts.apiKeyEnv != "") &&
+		opts.provider != accountstore.ProviderCommandCode {
+		return accountOptions{}, errors.New(
+			"-api-key and -api-key-env are only supported for the commandcode provider",
+		)
 	}
 	if opts.action == "history" && opts.output != "table" && opts.output != "json" {
 		return accountOptions{}, errors.New("output must be table or json")
@@ -1134,6 +1244,27 @@ func login(
 		return oauthpkce.TokenSet{}, fmt.Errorf("%s login: %w", displayName, err)
 	}
 	return tokens, nil
+}
+
+// commandCodeLogin runs the Command Code browser login, which provisions an
+// API key, the same flow `cmd login` uses.
+func commandCodeLogin(
+	ctx context.Context,
+	loginTimeout time.Duration,
+	stderr io.Writer,
+) (commandcodeauth.Credentials, error) {
+	credentials, err := commandcodeauth.Authenticate(ctx, commandcodeauth.Options{
+		Timeout: loginTimeout,
+		OnAuthorizationURL: func(authorizationURL string) {
+			fmt.Fprintln(stderr, "Open this URL in your browser to authorize Command Code:")
+			fmt.Fprintln(stderr, authorizationURL)
+		},
+		OpenBrowser: openBrowser,
+	})
+	if err != nil {
+		return commandcodeauth.Credentials{}, fmt.Errorf("Command Code login: %w", err)
+	}
+	return credentials, nil
 }
 
 func tokensFromEnvironment(getenv func(string) string) (oauthpkce.TokenSet, error) {

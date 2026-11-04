@@ -13,6 +13,12 @@ Rute currently has explicit Codex and Claude integrations rather than a
 runtime plugin system. Adding a provider is therefore a code change across the
 OAuth, credential, routing, proxy, CLI, and test layers.
 
+An API-key provider has no authorization-code flow, so it skips the OAuth
+steps below: its accounts use authentication mode `apikey`, it serves a static
+key through `codexauth.NewStatic`, and it implements its own login if it has
+one. See `providers/commandcode` and `internal/commandcodeauth` for the
+reference implementation.
+
 ## Design the integration first
 
 Before writing code, record:

@@ -49,6 +49,9 @@ type RefreshFunc func(context.Context, *http.Client, Config, Token) (Token, erro
 // Source serves concurrent credential readers and coalesces refreshes.
 type Source struct {
 	config Config
+	// static marks a source whose secret never expires or rotates, such as an
+	// API key. Static sources never refresh or require reauthentication.
+	static bool
 
 	mu         sync.Mutex
 	token      Token
@@ -85,6 +88,28 @@ func NewFromRefreshToken(
 		RefreshToken: refreshToken,
 		AccountID:    accountIDValue,
 	})
+}
+
+// NewStatic creates a source for a fixed secret, such as an API key. The
+// secret is served as the access token; Get never refreshes, ForceRefresh is a
+// no-op, and neither ever reports reauthentication required.
+func NewStatic(cfg Config, secret, accountIDValue string) (*Source, error) {
+	if secret == "" {
+		return nil, errors.New("codexauth: static secret is required")
+	}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{
+			Timeout: defaultRefreshTimeout,
+		}
+	}
+	return &Source{
+		config: cfg,
+		static: true,
+		token: Token{
+			AccessToken: secret,
+			AccountID:   accountIDValue,
+		},
+	}, nil
 }
 
 func newSource(cfg Config, token Token) (*Source, error) {
@@ -133,6 +158,11 @@ func (source *Source) ForceRefresh(ctx context.Context) (Token, error) {
 }
 
 func (source *Source) get(ctx context.Context, force bool) (Token, error) {
+	if source.static {
+		source.mu.Lock()
+		defer source.mu.Unlock()
+		return source.token, nil
+	}
 	for {
 		source.mu.Lock()
 		current := source.token

@@ -132,3 +132,32 @@ func TestAccountIDFromIDToken(t *testing.T) {
 		t.Errorf("account ID = %q", token.AccountID)
 	}
 }
+
+func TestStaticSourceNeverRefreshes(t *testing.T) {
+	t.Parallel()
+
+	source, err := NewStatic(Config{}, "api-key-123", "acct")
+	if err != nil {
+		t.Fatalf("new static source: %v", err)
+	}
+	token, err := source.Get(context.Background())
+	if err != nil || token.AccessToken != "api-key-123" {
+		t.Fatalf("get = %+v, %v", token, err)
+	}
+	if token.AccountID != "acct" {
+		t.Errorf("account ID = %q", token.AccountID)
+	}
+	if token.RefreshToken != "" {
+		t.Errorf("refresh token = %q, want empty", token.RefreshToken)
+	}
+	refreshed, err := source.ForceRefresh(context.Background())
+	if err != nil {
+		t.Fatalf("force refresh: %v", err)
+	}
+	if refreshed.AccessToken != "api-key-123" {
+		t.Errorf("forced token = %+v", refreshed)
+	}
+	if _, err := NewStatic(Config{}, "", ""); err == nil {
+		t.Fatal("empty static secret was accepted")
+	}
+}

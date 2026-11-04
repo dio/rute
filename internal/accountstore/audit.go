@@ -374,7 +374,11 @@ func validateAuditIdentity(event AuditEvent) error {
 }
 
 func validProvider(provider string) bool {
-	return provider == ProviderCodex || provider == ProviderClaude
+	switch provider {
+	case ProviderCodex, ProviderClaude, ProviderCommandCode:
+		return true
+	}
+	return false
 }
 
 func auditEventHash(event AuditEvent) (string, error) {

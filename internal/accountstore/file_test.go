@@ -529,3 +529,117 @@ func TestKeyringStoreSeparatesProviderServices(t *testing.T) {
 		}
 	}
 }
+
+func TestFileStoreRoundTripsAPIKeyAccounts(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "state", "credentials.json"))
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	account := Account{
+		ID:        "cc-1",
+		Provider:  ProviderCommandCode,
+		Name:      "work",
+		AccountID: "user-1",
+		AuthMode:  AuthModeAPIKey,
+		APIKey:    "secret-key",
+		State:     StateActive,
+	}
+	if err := store.Put(context.Background(), account); err != nil {
+		t.Fatalf("put account: %v", err)
+	}
+	accounts, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list accounts: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	got := accounts[0]
+	if got.APIKey != "secret-key" || got.RefreshToken != "" ||
+		got.AuthMode != AuthModeAPIKey || got.AccountID != "user-1" {
+		t.Errorf("account = %+v", got)
+	}
+}
+
+func TestFileStoreLoadsVersionTwoRecordAsOAuth(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatalf("chmod state directory: %v", err)
+	}
+	path := filepath.Join(directory, "credentials.json")
+	body := `{
+	  "version": 2,
+	  "accounts": [{
+	    "id": "old-id",
+	    "provider": "codex",
+	    "name": "default",
+	    "refresh_token": "refresh",
+	    "state": "active",
+	    "created_at": "2026-07-26T00:00:00Z",
+	    "updated_at": "2026-07-26T00:00:00Z"
+	  }]
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write credential file: %v", err)
+	}
+	store, err := NewFileStore(path)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	accounts, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].AuthMode != AuthModeOAuth {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+}
+
+func TestKeyringStoreKeepsAPIKeyOutOfManifest(t *testing.T) {
+	t.Parallel()
+
+	manifestPath := filepath.Join(t.TempDir(), "state", "accounts.json")
+	manifest, err := NewFileStore(manifestPath)
+	if err != nil {
+		t.Fatalf("new manifest: %v", err)
+	}
+	ring := newFakeKeyring()
+	store := newKeyringStore(ring, manifest)
+	account := Account{
+		ID:       "cc-id",
+		Provider: ProviderCommandCode,
+		Name:     "work",
+		AuthMode: AuthModeAPIKey,
+		APIKey:   "very-secret-key",
+		State:    StateActive,
+	}
+	if err := store.Put(context.Background(), account); err != nil {
+		t.Fatalf("put keyring account: %v", err)
+	}
+	manifestBody, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if strings.Contains(string(manifestBody), account.APIKey) {
+		t.Fatal("API key leaked into keyring manifest")
+	}
+	token, err := ring.Get(keyringService(ProviderCommandCode), account.ID)
+	if err != nil {
+		t.Fatalf("read keyring secret: %v", err)
+	}
+	if token != account.APIKey {
+		t.Errorf("keyring secret = %q", token)
+	}
+	accounts, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list keyring accounts: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].APIKey != account.APIKey ||
+		accounts[0].RefreshToken != "" {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+}

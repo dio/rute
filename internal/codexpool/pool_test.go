@@ -20,6 +20,92 @@ import (
 	"github.com/dio/rute/oauthpkce"
 )
 
+func TestPoolServesAPIKeyAccounts(t *testing.T) {
+	t.Parallel()
+
+	store := accountstore.NewMemoryStore()
+	pool, err := NewProvider(
+		context.Background(),
+		store,
+		accountstore.ProviderCommandCode,
+		codexauth.Config{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	added, err := pool.AddAPIKey(context.Background(), "work", "secret-key", "user-1")
+	if err != nil {
+		t.Fatalf("add api key: %v", err)
+	}
+	if added.AuthMode != accountstore.AuthModeAPIKey || added.AccountID != "user-1" {
+		t.Errorf("account = %+v", added)
+	}
+	lease, err := pool.Acquire(context.Background(), "session", nil)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if lease.Token.AccessToken != "secret-key" || lease.AccountName != "work" {
+		t.Errorf("lease = %+v", lease)
+	}
+	pool.Release(lease.AccountID)
+	if _, err := pool.ForceRefresh(context.Background(), lease.AccountID); err != nil {
+		t.Fatalf("force refresh an API-key account: %v", err)
+	}
+	if err := pool.SetAPIKey(context.Background(), "work", "rotated-key", ""); err != nil {
+		t.Fatalf("set api key: %v", err)
+	}
+	rotated, err := pool.Acquire(context.Background(), "session", nil)
+	if err != nil {
+		t.Fatalf("acquire after rotate: %v", err)
+	}
+	if rotated.Token.AccessToken != "rotated-key" {
+		t.Errorf("rotated token = %q", rotated.Token.AccessToken)
+	}
+	pool.Release(rotated.AccountID)
+	for _, record := range pool.Accounts() {
+		if record.APIKey != "" || record.RefreshToken != "" {
+			t.Errorf("account leaked a secret: %+v", record)
+		}
+	}
+}
+
+func TestPoolLoadsPersistedAPIKeyAccounts(t *testing.T) {
+	t.Parallel()
+
+	store := accountstore.NewMemoryStore()
+	if err := store.Put(context.Background(), accountstore.Account{
+		ID:       "cc-1",
+		Provider: accountstore.ProviderCommandCode,
+		Name:     "work",
+		AuthMode: accountstore.AuthModeAPIKey,
+		APIKey:   "persisted-key",
+		State:    accountstore.StateActive,
+	}); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	pool, err := NewProvider(
+		context.Background(),
+		store,
+		accountstore.ProviderCommandCode,
+		codexauth.Config{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	if err := pool.Bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	lease, err := pool.Acquire(context.Background(), "session", nil)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if lease.Token.AccessToken != "persisted-key" {
+		t.Errorf("token = %q", lease.Token.AccessToken)
+	}
+}
+
 func TestPoolAuditsAccountLifecycle(t *testing.T) {
 	t.Parallel()
 

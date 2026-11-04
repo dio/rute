@@ -16,7 +16,7 @@ import (
 // records its latency when the upstream body is closed.
 type upstreamCall struct {
 	ctx         context.Context
-	credentials credentialSource
+	credentials CredentialSource
 	metrics     latency.Sink
 	start       time.Time
 	record      latency.Record
