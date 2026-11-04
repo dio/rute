@@ -67,6 +67,8 @@ directory; the running server records its URLs and process ID in
 | `rute admin reload` | restarts rute on the same ports, for example after upgrading the binary; open clients keep working |
 | `rute admin stop` | stops rute; open clients lose their proxy until the next `rute claude` or `rute codex` |
 
+The dashboard's **restart** button does the same as `rute admin reload`.
+
 Routing changed on the dashboard is saved to `routing.json` in the state
 directory, so the next background rute uses it.
 
@@ -408,6 +410,7 @@ The same data is available as JSON:
 | `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
 | `GET /v1/logins/{id}` | the login's `state`: `pending`, `done`, or `failed` |
 | `GET /v1/usage?window=7d&by=day` | tokens and estimated cost per period, account, and model (`window`: `24h`, `7d`, `30d`; `by`: `hour`, `day`, `total`) |
+| `POST /v1/restart` with `{}` | restarts rute on the same ports (202); 503 when it was started with `-server-file=off` |
 | `PUT /v1/providers/claude/routing` with `{"balance":"priority","order":["default","personal"],"max_in_flight":6}` | the provider's new status; invalid routing returns 400 and changes nothing |
 
 The management port never contains credentials, but it can add accounts, so

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -397,6 +398,7 @@ func runServe(
 			ProxyURL:     "http://" + listener.Addr().String(),
 			Activity:     activity,
 			IdleTimeout:  opts.idleTimeout,
+			Restart:      restarter(opts.serverFile, stderr),
 			LoginTimeout: opts.loginTimeout,
 		})
 		if err != nil {
@@ -1158,4 +1160,28 @@ var idleCheckInterval = 30 * time.Second
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// restarter returns a function that runs "rute admin reload" detached, which
+// stops this server and starts a new one on the same addresses. It returns
+// nil when the server has no server file to find it by.
+func restarter(serverFile string, stderr io.Writer) func() error {
+	if serverFile == "off" {
+		return nil
+	}
+	return func() error {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		command := exec.Command(executable, "admin", "reload")
+		command.Stdout = stderr
+		command.Stderr = stderr
+		command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := command.Start(); err != nil {
+			return err
+		}
+		go func() { _ = command.Wait() }()
+		return nil
+	}
 }

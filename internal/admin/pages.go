@@ -15,13 +15,14 @@ import (
 const recentOnDashboard = 20
 
 type dashboardView struct {
-	Version   string
-	Uptime    string
-	Window    string
-	Windows   []string
-	Refresh   refreshOption
-	Refreshes []refreshOption
-	History   bool
+	Version    string
+	Uptime     string
+	Window     string
+	Windows    []string
+	Refresh    refreshOption
+	Refreshes  []refreshOption
+	History    bool
+	CanRestart bool
 	// Partial explains that history does not cover the whole window.
 	Partial   string
 	Error     string
@@ -110,13 +111,14 @@ func (server *Server) handleDashboard(writer http.ResponseWriter, request *http.
 	refresh := parseRefresh(request.URL.Query().Get("refresh"))
 	status := server.status()
 	view := dashboardView{
-		Version:   status.Version,
-		Uptime:    formatDuration(time.Duration(status.UptimeSeconds) * time.Second),
-		Window:    window.name,
-		Refresh:   refresh,
-		Refreshes: refreshOptions,
-		History:   status.History,
-		CSRF:      server.csrf,
+		Version:    status.Version,
+		Uptime:     formatDuration(time.Duration(status.UptimeSeconds) * time.Second),
+		Window:     window.name,
+		Refresh:    refresh,
+		Refreshes:  refreshOptions,
+		History:    status.History,
+		CanRestart: status.CanRestart,
+		CSRF:       server.csrf,
 	}
 	for _, item := range windows {
 		view.Windows = append(view.Windows, item.name)

@@ -67,6 +67,9 @@ type Config struct {
 	// IdleTimeout is how long the server stays up without activity; zero
 	// means it stays up.
 	IdleTimeout time.Duration
+	// Restart, when set, starts a replacement server on the same addresses
+	// in the background.
+	Restart func() error
 	// StartSession begins account logins. It defaults to StartOAuthSession.
 	StartSession SessionStarter
 	LoginTimeout time.Duration
@@ -122,6 +125,8 @@ func New(config Config) (*Server, error) {
 	server.mux.HandleFunc("POST /providers/{provider}/routing", server.handleRoutingForm)
 	server.mux.HandleFunc("GET /v1/status", server.handleStatus)
 	server.mux.HandleFunc("GET /v1/attach", server.handleAttach)
+	server.mux.HandleFunc("POST /v1/restart", server.handleRestartAPI)
+	server.mux.HandleFunc("POST /restart", server.handleRestartForm)
 	server.mux.HandleFunc("GET /v1/calls/summary", server.handleSummary)
 	server.mux.HandleFunc("GET /v1/calls/recent", server.handleRecent)
 	server.mux.HandleFunc("GET /v1/usage", server.handleUsageAPI)
@@ -165,6 +170,7 @@ type StatusResponse struct {
 	Started       time.Time `json:"started"`
 	UptimeSeconds int64     `json:"uptime_seconds"`
 	History       bool      `json:"history"`
+	CanRestart    bool      `json:"can_restart"`
 	ProxyURL      string    `json:"proxy_url,omitempty"`
 	// IdleTimeoutSeconds is zero when the server does not stop when idle.
 	IdleTimeoutSeconds int64              `json:"idle_timeout_seconds"`
@@ -177,6 +183,7 @@ func (server *Server) status() StatusResponse {
 		Started:            server.config.Started.UTC(),
 		UptimeSeconds:      int64(time.Since(server.config.Started).Seconds()),
 		History:            server.config.Calls != nil,
+		CanRestart:         server.config.Restart != nil,
 		ProxyURL:           server.config.ProxyURL,
 		IdleTimeoutSeconds: int64(server.config.IdleTimeout.Seconds()),
 	}
@@ -395,4 +402,39 @@ func validProvider(provider string) bool {
 func (server *Server) checkCSRF(request *http.Request) bool {
 	token := request.PostFormValue("csrf")
 	return subtle.ConstantTimeCompare([]byte(token), []byte(server.csrf)) == 1
+}
+
+// handleRestartAPI restarts the server. Requiring a JSON body means a
+// cross-site HTML form cannot submit it.
+func (server *Server) handleRestartAPI(writer http.ResponseWriter, request *http.Request) {
+	mediaType, _, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if mediaType != "application/json" {
+		writeError(writer, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	if err := server.restart(); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]bool{"restarting": true})
+}
+
+func (server *Server) handleRestartForm(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxFormBytes)
+	if err := request.ParseForm(); err != nil || !server.checkCSRF(request) {
+		writeError(writer, http.StatusForbidden, "invalid form token; reload the page and try again")
+		return
+	}
+	if err := server.restart(); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	server.render(writer, "restart.html", nil)
+}
+
+func (server *Server) restart() error {
+	if server.config.Restart == nil {
+		return errors.New("this rute cannot restart itself; it was started without a server file")
+	}
+	return server.config.Restart()
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -429,5 +430,49 @@ func TestUsageReportsTokensAndEstimatedCost(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Errorf("usage page missing %q", want)
 		}
+	}
+}
+
+func TestRestartFromDashboardAndAPI(t *testing.T) {
+	t.Parallel()
+	fixture := newFixture(t)
+	page := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/", nil)).Body.String()
+	if strings.Contains(page, `action="/restart"`) {
+		t.Error("restart button shown without a restart function")
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:20129/v1/restart", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	if got := fixture.do(t, request).Code; got != http.StatusServiceUnavailable {
+		t.Errorf("restart without a function = %d, want 503", got)
+	}
+
+	var restarts atomic.Int32
+	fixture.server.config.Restart = func() error { restarts.Add(1); return nil }
+	page = fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/", nil)).Body.String()
+	match := regexp.MustCompile(`action="/restart" class="inline"><input type="hidden" name="csrf" value="([0-9a-f]+)"`).FindStringSubmatch(page)
+	if match == nil {
+		t.Fatalf("no restart button:\n%s", page)
+	}
+	post := func(values url.Values) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:20129/restart", strings.NewReader(values.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return fixture.do(t, request)
+	}
+	if got := post(url.Values{}).Code; got != http.StatusForbidden || restarts.Load() != 0 {
+		t.Errorf("form without token = %d, restarts %d", got, restarts.Load())
+	}
+	if recorder := post(url.Values{"csrf": {match[1]}}); recorder.Code != http.StatusOK ||
+		!strings.Contains(recorder.Body.String(), `content="3; url=/"`) || restarts.Load() != 1 {
+		t.Errorf("form restart = %d, restarts %d", recorder.Code, restarts.Load())
+	}
+	for contentType, want := range map[string]int{"text/plain": http.StatusUnsupportedMediaType, "application/json": http.StatusAccepted} {
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:20129/v1/restart", strings.NewReader("{}"))
+		request.Header.Set("Content-Type", contentType)
+		if got := fixture.do(t, request).Code; got != want {
+			t.Errorf("API restart with %s = %d, want %d", contentType, got, want)
+		}
+	}
+	if restarts.Load() != 2 {
+		t.Errorf("restarts = %d, want 2", restarts.Load())
 	}
 }

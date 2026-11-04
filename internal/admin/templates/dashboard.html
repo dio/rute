@@ -6,6 +6,7 @@
 <header>
   <b>rute</b>
   <span class="muted">version {{.Version}} · running for {{.Uptime}}</span>
+  {{if .CanRestart}}<form method="post" action="/restart" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>restart</button></form>{{end}}
   {{range .Providers}}<span>{{.Name}}: {{.Summary}}</span>{{end}}
   <a href="/usage">usage</a>
   <nav class="right">refresh {{range .Refreshes}}<a href="/?window={{$.Window}}&amp;refresh={{.Name}}"{{if eq .Name $.Refresh.Name}} class="on"{{end}}>{{.Name}}</a>{{end}}</nav>
