@@ -1249,13 +1249,13 @@ func commandCodeLogin(
 	credentials, err := commandcodeauth.Authenticate(ctx, commandcodeauth.Options{
 		Timeout: loginTimeout,
 		OnAuthorizationURL: func(authorizationURL string) {
-			fmt.Fprintln(stderr, "Open this URL in your browser to authorize Command Code:")
-			fmt.Fprintln(stderr, authorizationURL)
+			_, _ = fmt.Fprintln(stderr, "Open this URL in your browser to authorize Command Code:")
+			_, _ = fmt.Fprintln(stderr, authorizationURL)
 		},
 		OpenBrowser: openBrowser,
 	})
 	if err != nil {
-		return commandcodeauth.Credentials{}, fmt.Errorf("Command Code login: %w", err)
+		return commandcodeauth.Credentials{}, fmt.Errorf("command code login: %w", err)
 	}
 	return credentials, nil
 }
