@@ -28,6 +28,9 @@ brew install dio/tap/rute
 brew upgrade rute
 ```
 
+The formula downloads the release archive for your OS and CPU and checks its
+SHA-256. It does not compile anything or need Go.
+
 To build from source into a directory on your personal `PATH`:
 
 ```sh
