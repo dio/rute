@@ -58,10 +58,17 @@ logs to `rute.log` in the state directory. Only one rute runs per state
 directory; the running server records its URLs and process ID in
 `server.json` there.
 
-`rute admin` opens the [dashboard](#management-dashboard-and-api) of the
-running rute, starting one when none is running. Routing changed there is
-saved to `routing.json` in the state directory, so the next background rute
-uses it.
+`rute admin` manages the background rute:
+
+| Command | Does |
+| --- | --- |
+| `rute admin` or `rute admin ui` | opens the [dashboard](#management-dashboard-and-api), starting rute when none is running |
+| `rute admin status` | prints the version, process, proxy and dashboard URLs, idle timeout, and accounts |
+| `rute admin reload` | restarts rute on the same ports, for example after upgrading the binary; open clients keep working |
+| `rute admin stop` | stops rute; open clients lose their proxy until the next `rute claude` or `rute codex` |
+
+Routing changed on the dashboard is saved to `routing.json` in the state
+directory, so the next background rute uses it.
 
 ## Local proxy
 

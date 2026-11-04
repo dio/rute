@@ -93,7 +93,7 @@ func newTestLauncher(t *testing.T, fake *fakeManagement) (*launcher, *strings.Bu
 		candidates: func() []string { return []string{server.URL} },
 		stderr:     &stderr,
 		client:     &http.Client{Timeout: 5 * time.Second},
-		spawn: func() (<-chan error, string, error) {
+		spawn: func(string, string) (<-chan error, string, error) {
 			spawned++
 			fake.up.Store(true)
 			return make(chan error), "/state/rute.log", nil
@@ -170,7 +170,7 @@ func TestLaunchReportsServerThatExits(t *testing.T) {
 	t.Parallel()
 	fake := &fakeManagement{t: t}
 	launcher, _, _, _ := newTestLauncher(t, fake)
-	launcher.spawn = func() (<-chan error, string, error) {
+	launcher.spawn = func(string, string) (<-chan error, string, error) {
 		exited := make(chan error, 1)
 		exited <- io.ErrUnexpectedEOF
 		return exited, "/state/rute.log", nil

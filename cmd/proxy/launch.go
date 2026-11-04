@@ -46,9 +46,13 @@ type launcher struct {
 	adminURL string
 	stderr   io.Writer
 	client   *http.Client
-	// spawn starts rute serve in the background and returns a channel that
-	// receives its exit error.
-	spawn       func() (<-chan error, string, error)
+	// stateDir holds server.json and the server lock.
+	stateDir string
+	// spawn starts rute serve in the background on the given listen
+	// addresses and returns a channel that receives its exit error.
+	spawn func(listen, adminListen string) (<-chan error, string, error)
+	// signal sends sig to process pid.
+	signal      func(pid int, sig syscall.Signal) error
 	openBrowser func(url string) error
 	lookPath    func(name string) (string, error)
 	run         func(ctx context.Context, name string, args, env []string) error
@@ -56,8 +60,11 @@ type launcher struct {
 }
 
 func newLauncher(stderr io.Writer, getenv func(string) string) *launcher {
+	dir, _ := accountstore.DefaultStateDir()
 	return &launcher{
-		candidates:  func() []string { return adminCandidates(getenv) },
+		stateDir:    dir,
+		candidates:  func() []string { return adminCandidates(getenv, dir) },
+		signal:      syscall.Kill,
 		stderr:      stderr,
 		client:      &http.Client{Timeout: 5 * time.Second},
 		spawn:       spawnServe,
@@ -158,13 +165,13 @@ func (launcher *launcher) status(ctx context.Context) (admin.StatusResponse, err
 
 // adminCandidates returns RUTE_ADMIN_URL when set; otherwise the URL in the
 // state directory's server.json, then the default management address.
-func adminCandidates(getenv func(string) string) []string {
+func adminCandidates(getenv func(string) string, stateDir string) []string {
 	if url := strings.TrimRight(getenv("RUTE_ADMIN_URL"), "/"); url != "" {
 		return []string{url}
 	}
 	var urls []string
-	if dir, err := accountstore.DefaultStateDir(); err == nil {
-		if info, err := serverfile.Read(filepath.Join(dir, "server.json")); err == nil && info.AdminURL != "" {
+	if stateDir != "" {
+		if info, err := serverfile.Read(filepath.Join(stateDir, "server.json")); err == nil && info.AdminURL != "" {
 			urls = append(urls, info.AdminURL)
 		}
 	}
@@ -191,7 +198,13 @@ func (launcher *launcher) ensureServer(ctx context.Context) (admin.StatusRespons
 	if status, err := launcher.discover(ctx); err == nil {
 		return status, nil
 	}
-	exited, logPath, err := launcher.spawn()
+	return launcher.startServer(ctx, "127.0.0.1:0", "127.0.0.1:0")
+}
+
+// startServer starts rute serve in the background and waits until it
+// answers.
+func (launcher *launcher) startServer(ctx context.Context, listen, adminListen string) (admin.StatusResponse, error) {
+	exited, logPath, err := launcher.spawn(listen, adminListen)
 	if err != nil {
 		return admin.StatusResponse{}, fmt.Errorf("start rute: %w", err)
 	}
@@ -312,22 +325,27 @@ func (launcher *launcher) do(request *http.Request, target any) error {
 }
 
 // attach holds a request open so the background rute stays up while the
-// client runs, and returns the function that releases it.
+// client runs, and returns the function that releases it. It attaches again
+// when the server restarts, as rute admin reload does.
 func (launcher *launcher) attach() func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, launcher.adminURL+"/v1/attach", nil)
-		if err != nil {
-			return
+		for ctx.Err() == nil {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, launcher.adminURL+"/v1/attach", nil)
+			if err != nil {
+				return
+			}
+			if response, err := (&http.Client{}).Do(request); err == nil {
+				_, _ = io.Copy(io.Discard, response.Body)
+				_ = response.Body.Close()
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(launcher.poll * 5):
+			}
 		}
-		response, err := (&http.Client{}).Do(request)
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, response.Body)
-		_ = response.Body.Close()
 	}()
 	return func() {
 		cancel()
@@ -337,7 +355,7 @@ func (launcher *launcher) attach() func() {
 
 // spawnServe starts "rute serve" detached from the terminal, logging to the
 // state directory.
-func spawnServe() (<-chan error, string, error) {
+func spawnServe(listen, adminListen string) (<-chan error, string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, "", err
@@ -356,7 +374,7 @@ func spawnServe() (<-chan error, string, error) {
 	}
 	defer func() { _ = logFile.Close() }()
 	command := exec.Command(executable, "serve",
-		"-listen=127.0.0.1:0", "-admin-listen=127.0.0.1:0",
+		"-listen="+listen, "-admin-listen="+adminListen,
 		"-idle-timeout="+launchIdleTimeout.String(), "-initial-login=false")
 	command.Stdout = logFile
 	command.Stderr = logFile
@@ -394,15 +412,127 @@ func runClient(_ context.Context, name string, args, env []string) error {
 	return err
 }
 
-// runAdmin opens the management dashboard in a browser, starting rute in the
-// background when none is running.
+// runAdmin implements "rute admin [ui|status|stop|reload]".
 func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) error {
-	if len(args) != 0 {
-		return errors.New("admin does not accept arguments")
+	command := "ui"
+	if len(args) > 0 {
+		command = args[0]
 	}
-	return newLauncher(stderr, getenv).openAdmin(ctx, stdout)
+	if len(args) > 1 {
+		return fmt.Errorf("admin %s does not accept arguments", command)
+	}
+	launcher := newLauncher(stderr, getenv)
+	switch command {
+	case "ui":
+		return launcher.openAdmin(ctx, stdout)
+	case "status":
+		return launcher.printStatus(ctx, stdout)
+	case "stop":
+		info, err := launcher.stopServer(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "stopped rute (process %d)\n", info.PID)
+		return err
+	case "reload":
+		return launcher.reload(ctx, stdout)
+	}
+	return fmt.Errorf("unknown admin command %q; use ui, status, stop, or reload", command)
 }
 
+var errNotRunning = errors.New("no background rute is running")
+
+// running returns the server file of the rute that holds the state
+// directory's lock.
+func (launcher *launcher) running() (serverfile.Info, error) {
+	info, err := serverfile.Read(filepath.Join(launcher.stateDir, "server.json"))
+	if err != nil {
+		return info, errNotRunning
+	}
+	lock, err := serverfile.Lock(launcher.stateDir)
+	if err == nil {
+		// Nothing holds the lock, so the file is left from a crash.
+		_ = lock.Close()
+		return info, errNotRunning
+	}
+	if !errors.Is(err, serverfile.ErrRunning) {
+		return info, err
+	}
+	return info, nil
+}
+
+// stopServer stops the running rute and waits for it to release the state
+// directory.
+func (launcher *launcher) stopServer(ctx context.Context) (serverfile.Info, error) {
+	info, err := launcher.running()
+	if err != nil {
+		return info, err
+	}
+	if err := launcher.signal(info.PID, syscall.SIGTERM); err != nil {
+		return info, fmt.Errorf("stop rute process %d: %w", info.PID, err)
+	}
+	deadline := time.Now().Add(shutdownTimeout + 5*time.Second)
+	for time.Now().Before(deadline) {
+		if lock, err := serverfile.Lock(launcher.stateDir); err == nil {
+			_ = lock.Close()
+			return info, nil
+		}
+		select {
+		case <-ctx.Done():
+			return info, ctx.Err()
+		case <-time.After(launcher.poll):
+		}
+	}
+	return info, fmt.Errorf("rute process %d did not stop", info.PID)
+}
+
+// reload restarts the running rute on the same addresses, so clients keep
+// their proxy URL, or starts one when none runs.
+func (launcher *launcher) reload(ctx context.Context, stdout io.Writer) error {
+	listen, adminListen := "127.0.0.1:0", "127.0.0.1:0"
+	info, err := launcher.stopServer(ctx)
+	switch {
+	case err == nil:
+		listen = strings.TrimPrefix(info.ProxyURL, "http://")
+		adminListen = strings.TrimPrefix(info.AdminURL, "http://")
+	case !errors.Is(err, errNotRunning):
+		return err
+	}
+	if _, err := launcher.startServer(ctx, listen, adminListen); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "rute is running; dashboard %s\n", launcher.adminURL)
+	return err
+}
+
+func (launcher *launcher) printStatus(ctx context.Context, stdout io.Writer) error {
+	status, err := launcher.discover(ctx)
+	if err != nil {
+		return errors.New("no rute is running")
+	}
+	info, _ := launcher.running()
+	idle := "never"
+	if status.IdleTimeoutSeconds > 0 {
+		idle = (time.Duration(status.IdleTimeoutSeconds) * time.Second).String() + " after the last client"
+	}
+	_, _ = fmt.Fprintf(stdout, "version    %s\nrunning    %s\n", status.Version,
+		(time.Duration(status.UptimeSeconds) * time.Second).String())
+	if info.PID != 0 {
+		_, _ = fmt.Fprintf(stdout, "process    %d\n", info.PID)
+	}
+	_, _ = fmt.Fprintf(stdout, "proxy      %s\ndashboard  %s\nstops      %s\n", status.ProxyURL, launcher.adminURL, idle)
+	for _, provider := range status.Providers {
+		noun := "accounts"
+		if len(provider.Accounts) == 1 {
+			noun = "account"
+		}
+		_, _ = fmt.Fprintf(stdout, "%-10s %d %s, %s\n", provider.Provider, len(provider.Accounts), noun, provider.Balance)
+	}
+	return nil
+}
+
+// openAdmin opens the dashboard, starting rute in the background when none
+// is running.
 func (launcher *launcher) openAdmin(ctx context.Context, stdout io.Writer) error {
 	if _, err := launcher.ensureServer(ctx); err != nil {
 		return err

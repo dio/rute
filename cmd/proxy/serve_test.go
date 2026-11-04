@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -111,6 +112,82 @@ func TestServeStopsWhenIdleAndStaysUpWhileAttached(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not stop after the client detached")
+	}
+	if _, err := os.Stat(serverFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("server file left after stop: %v", err)
+	}
+}
+
+func TestAdminStopAndReloadKeepAddresses(t *testing.T) {
+	stateDir := t.TempDir()
+	serverFile := filepath.Join(stateDir, "server.json")
+	var current context.CancelFunc
+	start := func(listen, adminListen string) (<-chan error, string, error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		current = cancel
+		exited := make(chan error, 1)
+		go func() {
+			exited <- runServe(ctx, []string{
+				"-listen=" + listen, "-admin-listen=" + adminListen, "-credential-store=memory",
+				"-metrics-db=off", "-routing-file=off", "-server-file=" + serverFile, "-initial-login=false",
+			}, io.Discard, func(string) string { return "" })
+		}()
+		return exited, filepath.Join(stateDir, "rute.log"), nil
+	}
+	launcher := &launcher{
+		stateDir: stateDir,
+		candidates: func() []string {
+			if info, err := serverfile.Read(serverFile); err == nil {
+				return []string{info.AdminURL}
+			}
+			return nil
+		},
+		stderr: io.Discard,
+		client: &http.Client{Timeout: 5 * time.Second},
+		spawn:  start,
+		signal: func(pid int, _ syscall.Signal) error {
+			if pid != os.Getpid() {
+				t.Errorf("signalled process %d, want %d", pid, os.Getpid())
+			}
+			current()
+			return nil
+		},
+		poll: 10 * time.Millisecond,
+	}
+	ctx := context.Background()
+	if _, err := launcher.stopServer(ctx); !errors.Is(err, errNotRunning) {
+		t.Fatalf("stop with no server = %v", err)
+	}
+	if _, err := launcher.ensureServer(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	first, err := serverfile.Read(serverFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout strings.Builder
+	if err := launcher.printStatus(ctx, &stdout); err != nil || !strings.Contains(stdout.String(), first.ProxyURL) {
+		t.Errorf("status = %q, %v", stdout.String(), err)
+	}
+
+	detach := launcher.attach()
+	if err := launcher.reload(ctx, &stdout); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	second, err := serverfile.Read(serverFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ProxyURL != first.ProxyURL || second.AdminURL != first.AdminURL || !second.Started.After(first.Started) {
+		t.Errorf("reload moved the server: %+v -> %+v", first, second)
+	}
+	detach()
+
+	if _, err := launcher.stopServer(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := launcher.running(); !errors.Is(err, errNotRunning) {
+		t.Errorf("running after stop = %v", err)
 	}
 	if _, err := os.Stat(serverFile); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("server file left after stop: %v", err)
