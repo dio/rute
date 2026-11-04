@@ -17,8 +17,20 @@ import (
 const currentVersion = 2
 
 const (
-	ProviderCodex  = "codex"
-	ProviderClaude = "claude"
+	ProviderCodex       = "codex"
+	ProviderClaude      = "claude"
+	ProviderCommandCode = "commandcode"
+)
+
+// AuthMode describes how an account authenticates to its upstream.
+type AuthMode string
+
+// Account authentication modes.
+const (
+	// AuthModeOAuth exchanges a stored refresh token for access tokens.
+	AuthModeOAuth AuthMode = "oauth"
+	// AuthModeAPIKey sends a static API key on every request.
+	AuthModeAPIKey AuthMode = "apikey"
 )
 
 var (
@@ -35,16 +47,33 @@ const (
 	StateReauthRequired State = "reauth_required"
 )
 
-// Account is one persisted provider account. RefreshToken is always secret.
+// Account is one persisted provider account. RefreshToken and APIKey are
+// always secret; exactly one is set, according to AuthMode.
 type Account struct {
 	ID           string    `json:"id"`
 	Provider     string    `json:"provider"`
 	Name         string    `json:"name"`
 	AccountID    string    `json:"account_id,omitempty"`
+	AuthMode     AuthMode  `json:"auth_mode,omitempty"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
+	APIKey       string    `json:"api_key,omitempty"`
 	State        State     `json:"state"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Secret returns the account's secret: the API key for API-key accounts and
+// the refresh token for OAuth accounts.
+func (account Account) Secret() string {
+	if account.AuthMode == AuthModeAPIKey {
+		return account.APIKey
+	}
+	return account.RefreshToken
+}
+
+// HasSecret reports whether the account carries the secret its mode requires.
+func (account Account) HasSecret() bool {
+	return account.Secret() != ""
 }
 
 // Store persists account records.
@@ -81,8 +110,25 @@ func normalizeAccount(account Account) (Account, error) {
 	if account.Provider == "" {
 		account.Provider = ProviderCodex
 	}
-	if account.Provider != ProviderCodex && account.Provider != ProviderClaude {
+	switch account.Provider {
+	case ProviderCodex, ProviderClaude, ProviderCommandCode:
+	default:
 		return Account{}, fmt.Errorf("accountstore: unsupported provider %q", account.Provider)
+	}
+	if account.AuthMode == "" {
+		if account.APIKey != "" {
+			account.AuthMode = AuthModeAPIKey
+		} else {
+			account.AuthMode = AuthModeOAuth
+		}
+	}
+	switch account.AuthMode {
+	case AuthModeOAuth:
+		account.APIKey = ""
+	case AuthModeAPIKey:
+		account.RefreshToken = ""
+	default:
+		return Account{}, fmt.Errorf("accountstore: unsupported auth mode %q", account.AuthMode)
 	}
 	if account.ID == "" {
 		return Account{}, errors.New("accountstore: account ID is required")

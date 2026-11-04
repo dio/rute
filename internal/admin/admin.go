@@ -70,7 +70,8 @@ type Config struct {
 	// Restart, when set, starts a replacement server on the same addresses
 	// in the background.
 	Restart func() error
-	// StartSession begins account logins. It defaults to StartOAuthSession.
+	// StartSession begins account logins. When nil, the package's
+	// provider-aware StartSession is used.
 	StartSession SessionStarter
 	LoginTimeout time.Duration
 }
@@ -90,7 +91,7 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("admin: at least one pool is required")
 	}
 	if config.StartSession == nil {
-		config.StartSession = StartOAuthSession
+		config.StartSession = StartSession
 	}
 	if config.LoginTimeout <= 0 {
 		config.LoginTimeout = defaultLoginTimeout
@@ -301,6 +302,7 @@ type loginRequest struct {
 	Provider string `json:"provider"`
 	Name     string `json:"name"`
 	Action   string `json:"action"`
+	APIKey   string `json:"api_key"`
 }
 
 // handleLoginAPI starts a login. Requiring a JSON body means a cross-site
@@ -321,7 +323,17 @@ func (server *Server) handleLoginAPI(writer http.ResponseWriter, request *http.R
 	if body.Action == "" {
 		body.Action = ActionAdd
 	}
-	login, err := server.logins.begin(body.Provider, strings.TrimSpace(body.Name), body.Action)
+	name := strings.TrimSpace(body.Name)
+	if strings.TrimSpace(body.APIKey) != "" {
+		login, err := server.logins.putKey(body.Provider, name, body.Action, body.APIKey)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, login)
+		return
+	}
+	login, err := server.logins.begin(body.Provider, name, body.Action)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errLoginInProgress) {
@@ -396,7 +408,9 @@ func writeError(writer http.ResponseWriter, status int, message string) {
 }
 
 func validProvider(provider string) bool {
-	return provider == accountstore.ProviderCodex || provider == accountstore.ProviderClaude
+	return provider == accountstore.ProviderCodex ||
+		provider == accountstore.ProviderClaude ||
+		provider == accountstore.ProviderCommandCode
 }
 
 func (server *Server) checkCSRF(request *http.Request) bool {

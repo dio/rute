@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/dio/rute/internal/accountstore"
 )
 
 func TestClaudeRateLimitSurvivesFailoverAndCooldown(t *testing.T) {
@@ -26,7 +28,10 @@ func TestClaudeRateLimitSurvivesFailoverAndCooldown(t *testing.T) {
 			handler, err := NewMulti(Config{
 				UpstreamURL: "http://127.0.0.1:1", ClaudeUpstreamURL: upstream.URL,
 				DefaultModel: "gpt-test",
-			}, &staticCredentials{}, newTwoAccountPool(t))
+			}, map[string]CredentialSource{
+				accountstore.ProviderCodex:  &staticCredentials{},
+				accountstore.ProviderClaude: newTwoAccountPool(t),
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -62,7 +67,11 @@ func TestClaudeAuthorizationCooldownIsNotReportedAsRateLimit(t *testing.T) {
 			for _, account := range pool.Accounts() {
 				pool.MarkAuthorizationFailure(account.ID)
 			}
-			handler, err := NewMulti(Config{UpstreamURL: "http://127.0.0.1:1", DefaultModel: "gpt-test"}, &staticCredentials{}, pool)
+			handler, err := NewMulti(Config{UpstreamURL: "http://127.0.0.1:1", DefaultModel: "gpt-test"},
+				map[string]CredentialSource{
+					accountstore.ProviderCodex:  &staticCredentials{},
+					accountstore.ProviderClaude: pool,
+				})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -91,7 +100,10 @@ func TestClaudeRequestRejectionDoesNotCoolDownAccounts(t *testing.T) {
 	handler, err := NewMulti(Config{
 		UpstreamURL: "http://127.0.0.1:1", ClaudeUpstreamURL: upstream.URL,
 		DefaultModel: "gpt-test",
-	}, &staticCredentials{}, pool)
+	}, map[string]CredentialSource{
+		accountstore.ProviderCodex:  &staticCredentials{},
+		accountstore.ProviderClaude: pool,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

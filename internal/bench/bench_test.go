@@ -126,7 +126,10 @@ func TestBenchThroughProxyBalancesAccounts(t *testing.T) {
 		ClaudeUpstreamURL: claudeServer.URL,
 		DefaultModel:      "gpt-test",
 		Metrics:           metrics,
-	}, codexPool, claudePool)
+	}, map[string]proxy.CredentialSource{
+		accountstore.ProviderCodex:  codexPool,
+		accountstore.ProviderClaude: claudePool,
+	})
 	if err != nil {
 		t.Fatalf("new proxy: %v", err)
 	}

@@ -45,14 +45,16 @@ func (handler *Handler) handleClaudeMessages(
 		return
 	}
 	if !resolution.Mapped &&
-		!strings.HasPrefix(strings.TrimSpace(requestedModel), accountstore.ProviderCodex+"/") {
+		!strings.HasPrefix(strings.TrimSpace(requestedModel), accountstore.ProviderCodex+"/") &&
+		!strings.HasPrefix(strings.TrimSpace(requestedModel), accountstore.ProviderCommandCode+"/") {
 		resolution.Provider = accountstore.ProviderClaude
 		resolution.UpstreamModel = strings.TrimPrefix(
 			strings.TrimSpace(requestedModel),
 			accountstore.ProviderClaude+"/",
 		)
 	}
-	if resolution.Provider != accountstore.ProviderClaude {
+	if resolution.Provider != accountstore.ProviderClaude &&
+		resolution.Provider != accountstore.ProviderCommandCode {
 		writeClaudeError(
 			writer,
 			http.StatusBadRequest,
@@ -67,22 +69,34 @@ func (handler *Handler) handleClaudeMessages(
 		writeClaudeError(writer, http.StatusBadRequest, "invalid request body", "invalid_request_error")
 		return
 	}
-	response, err := handler.claudeUpstream(
-		request.Context(),
-		"messages",
-		resolution.UpstreamModel,
-		payload,
-		request.Header,
-		requestSessionID(request),
-	)
+	var response *http.Response
+	if resolution.Provider == accountstore.ProviderCommandCode {
+		response, err = handler.commandCodeUpstream(
+			request.Context(),
+			"messages",
+			resolution.UpstreamModel,
+			payload,
+			request.Header,
+			requestSessionID(request),
+		)
+	} else {
+		response, err = handler.claudeUpstream(
+			request.Context(),
+			"messages",
+			resolution.UpstreamModel,
+			payload,
+			request.Header,
+			requestSessionID(request),
+		)
+	}
 	if err != nil {
-		handler.writeClaudeProxyError(writer, err)
+		handler.writeClaudeProxyError(writer, err, resolution.Provider)
 		return
 	}
 	defer func() {
 		_ = response.Body.Close()
 	}()
-	copyClaudeResponseHeaders(writer.Header(), response.Header)
+	copyUpstreamResponseHeaders(writer.Header(), response.Header)
 	writer.WriteHeader(response.StatusCode)
 	if strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
 		_ = copyResponseStream(request.Context(), writer, response.Body)
@@ -132,6 +146,7 @@ func (handler *Handler) claudeAttempts(
 			ctx,
 			payload,
 			downstreamHeaders,
+			lease.AuthMode,
 			lease.Token.AccessToken,
 		)
 		if err != nil {
@@ -153,6 +168,7 @@ func (handler *Handler) claudeAttempts(
 				ctx,
 				payload,
 				downstreamHeaders,
+				refreshed.AuthMode,
 				refreshed.Token.AccessToken,
 			)
 			if err != nil {
@@ -182,12 +198,17 @@ func (handler *Handler) doClaudeUpstream(
 	ctx context.Context,
 	payload []byte,
 	downstreamHeaders http.Header,
+	authMode accountstore.AuthMode,
 	accessToken string,
 ) (*http.Response, error) {
+	url := handler.config.ClaudeUpstreamURL
+	if authMode == accountstore.AuthModeAPIKey {
+		url = handler.config.ClaudeAPIURL
+	}
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		handler.config.ClaudeUpstreamURL,
+		url,
 		bytes.NewReader(payload),
 	)
 	if err != nil {
@@ -205,18 +226,24 @@ func (handler *Handler) doClaudeUpstream(
 	}
 	request.Header.Del("Authorization")
 	request.Header.Del("X-Api-Key")
-	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("Content-Type", "application/json")
+	if authMode == accountstore.AuthModeAPIKey {
+		request.Header.Set("X-Api-Key", accessToken)
+	} else {
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	if request.Header.Get("Accept") == "" {
 		request.Header.Set("Accept", "application/json, text/event-stream")
 	}
 	if request.Header.Get("Anthropic-Version") == "" {
 		request.Header.Set("Anthropic-Version", claude.APIVersion)
 	}
-	request.Header.Set(
-		"Anthropic-Beta",
-		mergeHeaderToken(request.Header.Get("Anthropic-Beta"), claude.OAuthCapability),
-	)
+	if authMode != accountstore.AuthModeAPIKey {
+		request.Header.Set(
+			"Anthropic-Beta",
+			mergeHeaderToken(request.Header.Get("Anthropic-Beta"), claude.OAuthCapability),
+		)
+	}
 	response, err := handler.config.HTTPClient.Do(request)
 	if err != nil {
 		return nil, err
@@ -261,7 +288,7 @@ func mergeHeaderToken(value, required string) string {
 	return strings.Join(result, ",")
 }
 
-func copyClaudeResponseHeaders(destination, source http.Header) {
+func copyUpstreamResponseHeaders(destination, source http.Header) {
 	for key, values := range source {
 		lower := strings.ToLower(key)
 		if lower != "content-type" &&
@@ -316,10 +343,11 @@ func writeClaudeError(writer http.ResponseWriter, status int, message, errorType
 	})
 }
 
-func (handler *Handler) writeClaudeProxyError(writer http.ResponseWriter, err error) {
+func (handler *Handler) writeClaudeProxyError(writer http.ResponseWriter, err error, provider string) {
+	label := providerDisplayLabel(provider)
 	if setRateLimitRetryAfter(writer, err) {
 		writeClaudeError(writer, http.StatusTooManyRequests,
-			"All Claude accounts are rate-limited; retry after the indicated cooldown",
+			"All "+label+" accounts are rate-limited; retry after the indicated cooldown",
 			"rate_limit_error")
 		return
 	}
@@ -329,21 +357,22 @@ func (handler *Handler) writeClaudeProxyError(writer http.ResponseWriter, err er
 		writeClaudeError(
 			writer,
 			http.StatusServiceUnavailable,
-			"Claude authentication is required; run 'rute account reauth -provider=claude NAME'",
+			label+" authentication is required; run 'rute account reauth -provider="+
+				provider+" NAME'",
 			"authentication_error",
 		)
 	case errors.Is(err, codexpool.ErrAccountsUnavailable):
 		writeClaudeError(
 			writer,
 			http.StatusServiceUnavailable,
-			"All Claude accounts are temporarily unavailable",
+			"All "+label+" accounts are temporarily unavailable",
 			"api_error",
 		)
 	default:
 		writeClaudeError(
 			writer,
 			http.StatusBadGateway,
-			"Claude upstream is unavailable",
+			label+" upstream is unavailable",
 			"api_error",
 		)
 	}

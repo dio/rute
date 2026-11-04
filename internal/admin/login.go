@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/commandcodeauth"
 	"github.com/dio/rute/oauthpkce"
 	"github.com/dio/rute/providers/claude"
 	"github.com/dio/rute/providers/codex"
@@ -40,8 +42,58 @@ type Session interface {
 	Close() error
 }
 
-// SessionStarter begins an OAuth authorization for provider.
-type SessionStarter func(provider string) (Session, error)
+// APIKeySession is a login that provisions a static API key instead of OAuth
+// tokens, as Command Code does.
+type APIKeySession interface {
+	AuthorizationURL() string
+	WaitAPIKey(ctx context.Context) (commandcodeauth.Credentials, error)
+	Close() error
+}
+
+// Pending is an account login in progress, of either kind. The login manager
+// completes it by type.
+type Pending interface {
+	AuthorizationURL() string
+	Close() error
+}
+
+// SessionStarter begins an account login for provider.
+type SessionStarter func(provider string) (Pending, error)
+
+// StartSession begins the provider's login: an Authorization Code + PKCE flow
+// for Codex and Claude, and a browser API-key login for Command Code, as
+// `rute account add` does.
+func StartSession(provider string) (Pending, error) {
+	if provider == accountstore.ProviderCommandCode {
+		session, err := commandcodeauth.Start(commandcodeauth.Options{})
+		if err != nil {
+			return nil, err
+		}
+		return commandCodeSession{session: session}, nil
+	}
+	session, err := StartOAuthSession(provider)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// commandCodeSession adapts a Command Code browser login to Pending.
+type commandCodeSession struct {
+	session *commandcodeauth.Session
+}
+
+func (session commandCodeSession) AuthorizationURL() string {
+	return session.session.AuthorizationURL()
+}
+
+func (session commandCodeSession) WaitAPIKey(ctx context.Context) (commandcodeauth.Credentials, error) {
+	return session.session.Wait(ctx)
+}
+
+func (session commandCodeSession) Close() error {
+	return session.session.Close()
+}
 
 // StartOAuthSession begins the provider's Authorization Code + PKCE flow with
 // a loopback callback, as `rute account add` does.
@@ -85,13 +137,14 @@ type logins struct {
 	order []string
 }
 
-func (manager *logins) begin(provider, name, action string) (Login, error) {
+// target validates an add or reauth against a provider's pool and returns it.
+func (manager *logins) target(provider, name, action string) (*codexpool.Pool, error) {
 	pool := manager.pools[provider]
 	if pool == nil {
-		return Login{}, fmt.Errorf("provider %q is not available", provider)
+		return nil, fmt.Errorf("provider %q is not available", provider)
 	}
 	if err := accountstore.ValidateName(name); err != nil {
-		return Login{}, err
+		return nil, err
 	}
 	exists := false
 	for _, account := range pool.Accounts() {
@@ -102,14 +155,52 @@ func (manager *logins) begin(provider, name, action string) (Login, error) {
 	switch action {
 	case ActionAdd:
 		if exists {
-			return Login{}, fmt.Errorf("%s account %q already exists; reauthenticate it instead", provider, name)
+			return nil, fmt.Errorf("%s account %q already exists; reauthenticate it instead", provider, name)
 		}
 	case ActionReauth:
 		if !exists {
-			return Login{}, fmt.Errorf("%s account %q does not exist", provider, name)
+			return nil, fmt.Errorf("%s account %q does not exist", provider, name)
 		}
 	default:
-		return Login{}, fmt.Errorf("action must be %s or %s", ActionAdd, ActionReauth)
+		return nil, fmt.Errorf("action must be %s or %s", ActionAdd, ActionReauth)
+	}
+	return pool, nil
+}
+
+// putKey adds or replaces an API-key account without a browser login.
+func (manager *logins) putKey(provider, name, action, apiKey string) (Login, error) {
+	pool, err := manager.target(provider, name, action)
+	if err != nil {
+		return Login{}, err
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return Login{}, errors.New("an API key is required")
+	}
+	ctx := context.Background()
+	if action == ActionAdd {
+		if _, err := pool.AddAPIKey(ctx, name, apiKey, ""); err != nil {
+			return Login{}, err
+		}
+	} else if err := pool.SetAPIKey(ctx, name, apiKey, ""); err != nil {
+		return Login{}, err
+	}
+	now := time.Now().UTC()
+	return Login{
+		ID:        randomID(),
+		Provider:  provider,
+		Name:      name,
+		Action:    action,
+		State:     LoginDone,
+		StartedAt: now,
+		ExpiresAt: now,
+	}, nil
+}
+
+func (manager *logins) begin(provider, name, action string) (Login, error) {
+	pool, err := manager.target(provider, name, action)
+	if err != nil {
+		return Login{}, err
 	}
 
 	manager.mu.Lock()
@@ -144,21 +235,39 @@ func (manager *logins) begin(provider, name, action string) (Login, error) {
 	return *login, nil
 }
 
-func (manager *logins) complete(id string, pool *codexpool.Pool, session Session) {
-	defer func() { _ = session.Close() }()
+func (manager *logins) complete(id string, pool *codexpool.Pool, pending Pending) {
+	defer func() { _ = pending.Close() }()
 	manager.mu.Lock()
 	login := *manager.items[id]
 	manager.mu.Unlock()
 
 	ctx, cancel := context.WithDeadline(context.Background(), login.ExpiresAt)
 	defer cancel()
-	tokens, err := session.Wait(ctx)
-	if err == nil {
-		if login.Action == ActionAdd {
-			_, err = pool.Add(ctx, login.Name, tokens)
-		} else {
-			err = pool.Reauth(ctx, login.Name, tokens)
+
+	var err error
+	switch session := pending.(type) {
+	case APIKeySession:
+		var credentials commandcodeauth.Credentials
+		credentials, err = session.WaitAPIKey(ctx)
+		if err == nil {
+			if login.Action == ActionAdd {
+				_, err = pool.AddAPIKey(ctx, login.Name, credentials.APIKey, credentials.UserID)
+			} else {
+				err = pool.SetAPIKey(ctx, login.Name, credentials.APIKey, credentials.UserID)
+			}
 		}
+	case Session:
+		var tokens oauthpkce.TokenSet
+		tokens, err = session.Wait(ctx)
+		if err == nil {
+			if login.Action == ActionAdd {
+				_, err = pool.Add(ctx, login.Name, tokens)
+			} else {
+				err = pool.Reauth(ctx, login.Name, tokens)
+			}
+		}
+	default:
+		err = errors.New("admin: unsupported login session")
 	}
 
 	manager.mu.Lock()

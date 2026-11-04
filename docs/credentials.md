@@ -1,18 +1,20 @@
 # Credential provisioning and non-interactive use
 
-Rute can complete OAuth once and then run without browser interaction. For
-multiple accounts or multiple providers, use a private JSON credential bundle.
+Rute can complete the browser login once and then run without browser
+interaction. For multiple accounts or multiple providers, use a private JSON
+credential bundle.
 
 This is similar to supplying a service-account JSON file operationally, but the
-credential semantics are different: the bundle contains OAuth refresh tokens
-and is mutable because providers may rotate those tokens.
+credential semantics are different: the bundle holds either OAuth refresh
+tokens or static API keys, per account, and is mutable because providers may
+rotate refresh tokens.
 
 ## Choose a storage mode
 
 | Mode | Accounts and providers | Persistence | Intended use |
 | --- | --- | --- | --- |
-| Native keyring | Multiple Codex and Claude accounts | Refresh tokens in macOS Keychain or Linux Secret Service | Normal single-user workstation |
-| Credential bundle | Multiple Codex and Claude accounts | Refresh tokens in one private JSON file | Headless hosts, portable provisioning, controlled automation |
+| Native keyring | Multiple accounts across Codex, Claude, and Command Code | Refresh tokens and API keys in macOS Keychain or Linux Secret Service | Normal single-user workstation |
+| Credential bundle | Multiple accounts across Codex, Claude, and Command Code | Refresh tokens and API keys in one private JSON file | Headless hosts, portable provisioning, controlled automation |
 | Memory | Accounts added only for the running process | None | Temporary testing |
 | `RUTE_CODEX_*` environment | One Codex account only | None | Backward-compatible local automation |
 
@@ -57,13 +59,54 @@ rute account add \
   -credential-file=/absolute/private/path/credentials.json
 ```
 
-Each `account add` prints an authorization URL and waits for its loopback
-callback. The resulting file is created with mode `0600`. Account names are
-provider-scoped, so `-name=primary` may be used once for Codex and once for
-Claude.
+An OAuth `account add` prints an authorization URL and waits for its loopback
+callback; an API-key `account add` stores the key without a browser. The
+resulting file is created with mode `0600`. Account names are provider-scoped,
+so `-name=primary` may be used once for Codex and once for Claude.
 
 The CLI owns the credential-file schema. Do not hand-author refresh tokens or
-edit generated account IDs, timestamps, or state fields.
+API keys, and do not edit generated account IDs, timestamps, or state fields.
+
+## Add an API-key account
+
+Each account authenticates one of two ways: a browser login that yields OAuth
+tokens (Codex and Claude) or a static API key. Command Code uses API keys only;
+Codex and Claude accept either. Supply a key directly, read it from an
+environment variable, or omit both to log in through the browser (which
+provisions a key for Command Code):
+
+```sh
+rute account add \
+  -provider=codex \
+  -name=codex-api \
+  -api-key-env=OPENAI_API_KEY \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+
+rute account add \
+  -provider=commandcode \
+  -name=cmd \
+  -api-key-env=COMMANDCODE_API_KEY \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+```
+
+An API-key account stores a static key instead of a refresh token, so it is
+never rotated. It sends requests to the provider's API endpoint rather than the
+subscription backend; the README and the provider packages list those
+endpoints. Replace a stored key with `account reauth`:
+
+```sh
+rute account reauth \
+  -provider=codex \
+  -name=codex-api \
+  -api-key=NEW_KEY \
+  -credential-store=file \
+  -credential-file=/absolute/private/path/credentials.json
+```
+
+`account list` shows each account's auth mode, so an API-key account is
+distinguishable from a subscription account.
 
 ## Verify the bundle without exposing secrets
 
@@ -94,7 +137,7 @@ rute account list \
   -credential-file=/absolute/private/path/credentials.json
 ```
 
-`account list` never prints refresh or access tokens.
+`account list` never prints refresh tokens, API keys, or access tokens.
 
 ## Audit credential changes
 
@@ -107,9 +150,10 @@ Rute keeps secret state and history separate:
 - keyring storage uses the same audit format beside its private
   `accounts.json` manifest, while refresh tokens remain in the native keyring.
 
-Every successful account add, credential refresh-token rotation,
-reauthentication, removal, and transition to `reauth_required` attempts to
-append an event. Inspect all providers:
+Every successful account add (OAuth or API key), credential refresh-token
+rotation, reauthentication (including replacing a stored API key), removal, and
+transition to `reauth_required` attempts to append an event. Inspect all
+providers:
 
 ```sh
 rute account history \
@@ -174,20 +218,22 @@ rute \
   -credential-file=/absolute/private/path/credentials.json
 ```
 
-Rute loads all Codex and Claude accounts, obtains access tokens from their
-stored refresh tokens, and refreshes them automatically. No browser is opened
-while at least one stored account exists.
+Rute loads every account: it obtains access tokens from stored refresh tokens
+for OAuth accounts, and uses stored API keys directly for API-key accounts. No
+browser is opened while at least one stored account exists.
 
 Account selection remains provider-local:
 
 - a Codex model uses only Codex accounts;
 - a Claude model uses only Claude accounts;
+- a `commandcode/` model uses only Command Code accounts;
+- a provider's pool may mix OAuth and API-key accounts, and a request uses
+  whichever the selected account has;
 - new sessions rotate across healthy accounts for that provider; and
 - authorization or quota failures may fail over to another account for the
   same provider.
 
-An unhealthy Claude account is never replaced by a Codex account, or vice
-versa.
+An unhealthy account is never replaced by another provider's account.
 
 ## Treat the bundle as mutable secret state
 
@@ -259,7 +305,8 @@ Rute also accepts:
 
 - Codex-only;
 - a single account;
-- exclusive, so persistent Codex and Claude accounts are not loaded;
+- exclusive, so persistent Codex, Claude, and Command Code accounts are not
+  loaded;
 - process-local; and
 - unable to persist refresh-token rotation.
 

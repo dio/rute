@@ -13,6 +13,12 @@ Rute currently has explicit Codex and Claude integrations rather than a
 runtime plugin system. Adding a provider is therefore a code change across the
 OAuth, credential, routing, proxy, CLI, and test layers.
 
+An API-key provider has no authorization-code flow, so it skips the OAuth
+steps below: its accounts use authentication mode `apikey`, it serves a static
+key through `codexauth.NewStatic`, and it implements its own login if it has
+one. See `providers/commandcode` and `internal/commandcodeauth` for the
+reference implementation.
+
 ## Design the integration first
 
 Before writing code, record:
@@ -140,12 +146,12 @@ bodies to `AuditEvent`.
 
 Load a provider-specific `codexpool.Pool` from the shared account store during
 startup, bootstrap it independently, run its refresh manager, and add it to the
-proxy's credential-source map.
-
-The current `proxy.NewMulti` constructor has explicit Codex and Claude
-arguments. For a third provider, prefer changing it to accept a provider-keyed
-credential map rather than adding another positional argument. Preserve
-`proxy.New` as the backward-compatible Codex-only constructor.
+proxy's credential-source map. `proxy.NewMulti` takes a provider-keyed
+`map[string]proxy.CredentialSource`, so a new provider is one more entry;
+`proxy.New` stays the Codex-only constructor. A provider that authenticates with
+a static API key instead of OAuth serves its accounts through
+`codexauth.NewStatic` and declares its API endpoint in `proxy.Config`; see
+`providers/commandcode`.
 
 Each request must acquire credentials only from the resolved provider pool.
 Session stickiness, authorization refresh/retry, rate-limit cooldown, and

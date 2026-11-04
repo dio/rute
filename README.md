@@ -48,7 +48,7 @@ CGO_ENABLED=0 go build -o "$HOME/.local/bin/rute" ./cmd/proxy
 | State directory | `~/Library/Application Support/rute/` | `$XDG_STATE_HOME/rute/`, default `~/.local/state/rute/` |
 | Credential bundle (`-credential-store=file`) | `<state>/credentials.json` | same |
 | Account manifest (`-credential-store=keyring`) | `<state>/accounts.json` | same |
-| Refresh tokens (`-credential-store=keyring`) | Keychain services `rute/codex` and `rute/claude` | Secret Service, same service names |
+| Refresh tokens and API keys (`-credential-store=keyring`) | Keychain services `rute/codex`, `rute/claude`, and `rute/commandcode` | Secret Service, same service names |
 | Credential audit log | `<credentials.json or accounts.json>.audit.jsonl` | same |
 | Call counters for the dashboard and usage | `<state>/metrics.db` | same |
 | Estimated prices (`-prices`) | `<state>/prices.json`, created by you | same |
@@ -72,16 +72,19 @@ keep it running all the time on the fixed ports instead.
 
 ## Quick start
 
-Run Claude Code or the Codex CLI through rute:
+Run Claude Code, the Codex CLI, or the Command Code CLI through rute:
 
 ```sh
 rute claude
 rute codex
+rute cmd
 ```
 
-Every argument after `rute claude` or `rute codex` goes to the client, so
-`rute codex --yolo` and `rute claude --resume` work. A leading `--` is
-dropped, as in `rute codex -- --yolo`.
+Every argument after `rute claude`, `rute codex`, or `rute cmd` goes to the
+client, so `rute codex --yolo` and `rute claude --resume` work. A leading `--`
+is dropped, as in `rute codex -- --yolo`. `rute cmd` registers rute as a
+Command Code BYOK provider; see
+[Running the Command Code CLI through rute](#running-the-command-code-cli-through-rute).
 
 The command:
 
@@ -431,9 +434,14 @@ dashboard that refreshes every five seconds and shows:
   week; and
 - the most recent calls.
 
-**Add account** and **log in again** run the same OAuth login as
-`rute account add` and `rute account reauth`, and the account joins the
-running pool without a restart. Removing accounts stays in the CLI.
+**Add account** and **log in again** run the same login as `rute account add`
+and `rute account reauth` — the browser OAuth flow for Codex and Claude, and
+the Command Code browser login that provisions an API key — and the account
+joins the running pool without a restart. The form also takes an optional API
+key: paste one to store an API-key account for any provider, or leave it blank
+to authorize in the browser. Each account row shows its auth mode (`oauth` or
+`api key`), offers **log in again** for OAuth accounts and **replace key** for
+API-key accounts, and removing accounts stays in the CLI.
 
 **change routing** sets a provider's balance mode, account order, and max in
 flight, with the same rules as the `-<provider>-balance`,
@@ -446,7 +454,7 @@ The same data is available as JSON:
 
 | Request | Returns |
 | --- | --- |
-| `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts |
+| `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts (each with its auth mode) |
 | `GET /v1/calls/summary?window=1h` | call statistics by account and calls in flight (`15m`, `1h`, `24h`, `7d`) |
 | `GET /v1/calls/recent?limit=50` | the newest calls |
 | `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
@@ -563,13 +571,14 @@ Benchmark load uses the same subscription quota as other work.
 
 ### Model routing
 
-Unprefixed model IDs route to Codex. Prefix a model with `claude/` or `codex/`
-to select a provider explicitly:
+Unprefixed model IDs route to Codex. Prefix a model with `claude/`, `codex/`,
+or `commandcode/` to select a provider explicitly:
 
 ```text
 gpt-5.6-sol                 -> Codex model gpt-5.6-sol
 codex/gpt-5.6-sol           -> Codex model gpt-5.6-sol
 claude/claude-sonnet-5      -> Claude model claude-sonnet-5
+commandcode/claude-sonnet-4-6 -> Command Code model claude-sonnet-4-6
 ```
 
 The native `/v1/messages` endpoint treats an unprefixed model as Claude, while
@@ -600,8 +609,9 @@ rute -models-file=/absolute/path/models.json
 ```
 
 The file must be a JSON array. `id`, `provider`, and `upstream_model` are
-required; `provider` must be `codex` or `claude`. Configured aliases are
-returned by `/v1/models` and take precedence over namespace routing.
+required; `provider` must be `codex`, `claude`, or `commandcode`. Configured
+aliases are returned by `/v1/models` and take precedence over namespace
+routing.
 
 ### HTTP examples
 
@@ -708,6 +718,61 @@ Set `RUTE_DOWNSTREAM_KEY` to any non-empty placeholder. Codex CLI requires the
 provider credential setting, but `rute` ignores the downstream Authorization
 header. Set `supports_websockets = false` to use HTTP SSE instead.
 
+### API keys
+
+An account authenticates one of two ways: a subscription (OAuth for Codex and
+Claude, or the Command Code browser login) or a static API key. The two coexist
+per account, and the pool balances and fails over across both. Add an API-key
+account with a key you have, or read it from an environment variable:
+
+```sh
+rute account add -provider=codex -name=api -api-key-env=OPENAI_API_KEY
+rute account add -provider=claude -name=api -api-key-env=ANTHROPIC_API_KEY
+rute account add -provider=commandcode -name=work -api-key=COMMANDCODE_KEY
+rute account reauth -provider=claude api            # replace the key
+rute account list                                   # shows each account's auth mode
+```
+
+An API-key account goes to the provider's API endpoint, not the subscription
+backend:
+
+| Provider | Subscription | API key |
+| --- | --- | --- |
+| codex | `chatgpt.com/backend-api/codex/responses` (`Authorization: Bearer`) | `api.openai.com/v1/responses` (`Authorization: Bearer`) |
+| claude | `api.anthropic.com/v1/messages` (`Authorization: Bearer`, OAuth beta) | `api.anthropic.com/v1/messages` (`x-api-key`) |
+| commandcode | — (API key only) | `api.commandcode.ai/provider/v1` (`Authorization: Bearer`) |
+
+Command Code accounts are API-key only. Supply the key with `-api-key` or
+`-api-key-env`, or omit both to log in through the browser, which provisions a
+key. It serves the Anthropic Messages, OpenAI Responses, and OpenAI Chat
+Completions endpoints; route a model to it with the `commandcode/` prefix, as
+in `commandcode/claude-sonnet-4-6` on `/v1/messages` or
+`commandcode/deepseek/deepseek-v4-flash` on `/v1/responses` and
+`/v1/chat/completions`. Claude models are served on `/v1/messages` only, and
+OpenAI and open models on `/v1/responses` and `/v1/chat/completions`; a model
+sent to the wrong endpoint is passed through as Command Code's own `400`.
+
+API keys are stored like refresh tokens: the native keyring by default, or a
+`0600` JSON file with `-credential-store=file`. They are secrets; never commit
+or log them. The dashboard's add form takes an optional API key, so keys can be
+pasted there too; use the CLI for scripted provisioning.
+
+### Running the Command Code CLI through rute
+
+`rute cmd` starts a background rute when needed, registers rute as a BYOK
+provider in `~/.commandcode/providers.json` when it is absent, and runs `cmd`
+with the remaining arguments:
+
+```sh
+rute cmd
+rute cmd -m rute/gpt-5.6-sol
+```
+
+The `rute` entry points the CLI at the local proxy with a keyless endpoint
+(`apiKey: false`), so its models appear under `rute/` in `/model`. An existing
+`rute` entry, and every other provider in the file, is left untouched; edit or
+remove the entry by hand to change it.
+
 ### Supplying credentials non-interactively
 
 The recommended multi-account, multi-provider workflow is to complete OAuth
@@ -758,9 +823,9 @@ accepts:
 - `RUTE_CODEX_EXPIRES_AT` (optional RFC3339 timestamp)
 
 When `RUTE_CODEX_ACCESS_TOKEN` is set, the environment credential is exclusive
-and ephemeral: persistent Codex and Claude accounts are not loaded, and rotated
-refresh tokens are not written back anywhere. Environment mode therefore does
-not provide multi-account or multi-provider operation.
+and ephemeral: persistent Codex, Claude, and Command Code accounts are not
+loaded, and rotated refresh tokens are not written back anywhere. Environment
+mode therefore does not provide multi-account or multi-provider operation.
 
 See [docs/credentials.md](docs/credentials.md) for provisioning, deployment,
 rotation, and recovery details.
@@ -828,12 +893,14 @@ belong to `cmd/proxy` and its internal credential manager.
 
 ## Provider notice
 
-The Codex and Claude profiles mirror observed first-party CLI protocols. They
-are not official compatibility promises. OAuth client behavior, endpoints,
-headers, and request rules can change. Callers are responsible for complying
-with each provider's terms and account policies. Rute deliberately sends only
-the protocol headers needed for OAuth access; it does not spoof a first-party
-CLI's operating system, runtime, SDK, or user-agent fingerprint.
+The Codex and Claude profiles mirror observed first-party CLI protocols, and
+the Command Code integration uses that product's documented Provider API and
+Studio login flow. They are not official compatibility promises. OAuth client
+behavior, endpoints, headers, and request rules can change. Callers are
+responsible for complying with each provider's terms and account policies. Rute
+deliberately sends only the protocol headers needed for OAuth access; it does
+not spoof a first-party CLI's operating system, runtime, SDK, or user-agent
+fingerprint.
 
 ## Development
 

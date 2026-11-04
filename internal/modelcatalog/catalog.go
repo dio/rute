@@ -128,6 +128,7 @@ func (catalog *Catalog) Resolve(model, defaultModel string) (Resolution, error) 
 	for _, provider := range []string{
 		accountstore.ProviderClaude,
 		accountstore.ProviderCodex,
+		accountstore.ProviderCommandCode,
 	} {
 		prefix := provider + "/"
 		if strings.HasPrefix(model, prefix) {
@@ -191,7 +192,8 @@ func normalizeModel(model Model) (Model, error) {
 		return Model{}, errors.New("id must not contain whitespace")
 	}
 	if model.Provider != accountstore.ProviderCodex &&
-		model.Provider != accountstore.ProviderClaude {
+		model.Provider != accountstore.ProviderClaude &&
+		model.Provider != accountstore.ProviderCommandCode {
 		return Model{}, fmt.Errorf("unsupported provider %q", model.Provider)
 	}
 	if err := validateValue("upstream_model", model.UpstreamModel, 256); err != nil {
@@ -203,6 +205,7 @@ func normalizeModel(model Model) (Model, error) {
 	for _, prefix := range []string{
 		accountstore.ProviderCodex + "/",
 		accountstore.ProviderClaude + "/",
+		accountstore.ProviderCommandCode + "/",
 	} {
 		if strings.HasPrefix(model.UpstreamModel, prefix) {
 			return Model{}, errors.New("upstream_model must not contain a provider namespace")

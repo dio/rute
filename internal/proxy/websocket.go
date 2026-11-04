@@ -91,7 +91,8 @@ func (handler *Handler) handleResponsesWebSocket(
 			}
 			continue
 		}
-		if resolution.Provider != accountstore.ProviderCodex {
+		if resolution.Provider != accountstore.ProviderCodex &&
+			resolution.Provider != accountstore.ProviderCommandCode {
 			if !handler.writeWebSocketError(
 				ctx,
 				connection,
@@ -103,26 +104,40 @@ func (handler *Handler) handleResponsesWebSocket(
 			continue
 		}
 		body["model"] = resolution.UpstreamModel
-		normalized, normalizeErr := normalizeResponses(
-			body,
-			handler.config.DefaultModel,
-			sessionID,
+		var (
+			response    *http.Response
+			upstreamErr error
 		)
-		if normalizeErr != nil {
-			if !handler.writeWebSocketError(
+		if resolution.Provider == accountstore.ProviderCommandCode {
+			response, upstreamErr = handler.commandCodeUpstreamJSON(
 				ctx,
-				connection,
-				"invalid_request_error",
-				normalizeErr.Error(),
-			) {
-				return
+				"responses_ws",
+				resolution.UpstreamModel,
+				body,
+				nil,
+				sessionID,
+			)
+		} else {
+			normalized, normalizeErr := normalizeResponses(
+				body,
+				handler.config.DefaultModel,
+				sessionID,
+			)
+			if normalizeErr != nil {
+				if !handler.writeWebSocketError(
+					ctx,
+					connection,
+					"invalid_request_error",
+					normalizeErr.Error(),
+				) {
+					return
+				}
+				continue
 			}
-			continue
+			response, upstreamErr = handler.upstream(ctx, "responses_ws", normalized, sessionID)
 		}
-
-		response, upstreamErr := handler.upstream(ctx, "responses_ws", normalized, sessionID)
 		if upstreamErr != nil {
-			errorType, message := webSocketProxyError(upstreamErr)
+			errorType, message := webSocketProxyError(upstreamErr, resolution.Provider)
 			if !handler.writeWebSocketError(
 				ctx,
 				connection,
@@ -141,22 +156,24 @@ func (handler *Handler) handleResponsesWebSocket(
 	}
 }
 
-func webSocketProxyError(err error) (string, string) {
+func webSocketProxyError(err error, provider string) (string, string) {
+	label := providerDisplayLabel(provider)
 	if errors.Is(err, codexpool.ErrAuthenticationRequired) ||
 		errors.Is(err, codexauth.ErrReauthenticationRequired) {
 		return "authentication_required",
-			"Codex authentication is required; run 'rute account reauth NAME'"
+			label + " authentication is required; run 'rute account reauth -provider=" +
+				provider + " NAME'"
 	}
 	var unavailable *codexpool.UnavailableError
 	if errors.As(err, &unavailable) && unavailable.RateLimited {
 		return "rate_limit_error",
-			"All Codex accounts are rate-limited; retry after the cooldown"
+			"All " + label + " accounts are rate-limited; retry after the cooldown"
 	}
 	if errors.Is(err, codexpool.ErrAccountsUnavailable) {
 		return "upstream_accounts_unavailable",
-			"All Codex accounts are temporarily unavailable"
+			"All " + label + " accounts are temporarily unavailable"
 	}
-	return "upstream_error", "Codex upstream is unavailable"
+	return "upstream_error", label + " upstream is unavailable"
 }
 
 func decodeResponseCreate(message []byte) (map[string]any, error) {

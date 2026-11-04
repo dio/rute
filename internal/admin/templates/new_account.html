@@ -5,16 +5,18 @@
 <header><b><a href="/">rute</a></b><span>add account</span></header>
 <form method="post" action="/accounts" class="box">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
-  <input type="hidden" name="action" value="add">
+  <input type="hidden" name="action" value="{{.Action}}">
   <label for="provider">provider</label>
   <select id="provider" name="provider">
     {{range .Providers}}<option value="{{.}}"{{if eq . $.Provider}} selected{{end}}>{{.}}</option>{{end}}
   </select>
   <label for="name">account name</label>
   <input id="name" name="name" value="{{.Name}}" required autofocus>
-  <p class="muted">rute shows a sign-in link next. Sign in with the subscription you want to add; check which account your browser is signed in to first.</p>
+  <label for="api_key">API key <span class="muted">optional</span></label>
+  <input id="api_key" name="api_key" type="password" autocomplete="off">
+  <p class="muted">Paste an API key to store an API-key account, or leave it blank to sign in with a subscription in the browser. Check which account your browser is signed in to first.</p>
   {{if .Error}}<p class="attention">{{.Error}}</p>{{end}}
-  <button>start login</button>
+  <button>add account</button>
 </form>
 </body>
 </html>

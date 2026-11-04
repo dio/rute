@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,8 @@ const (
 type Lease struct {
 	AccountID   string
 	AccountName string
+	// AuthMode is how the selected account authenticates upstream.
+	AuthMode accountstore.AuthMode
 	// InFlight counts the account's leased calls when this lease was
 	// acquired, including this one.
 	InFlight int
@@ -132,7 +135,9 @@ func NewProvider(
 	if store == nil {
 		return nil, errors.New("codexpool: store is required")
 	}
-	if provider != accountstore.ProviderCodex && provider != accountstore.ProviderClaude {
+	if provider != accountstore.ProviderCodex &&
+		provider != accountstore.ProviderClaude &&
+		provider != accountstore.ProviderCommandCode {
 		return nil, fmt.Errorf("codexpool: unsupported provider %q", provider)
 	}
 	if stderr == nil {
@@ -151,6 +156,26 @@ func NewProvider(
 	}
 	for _, record := range records {
 		if record.Provider != provider {
+			continue
+		}
+		if record.AuthMode == accountstore.AuthModeAPIKey {
+			if record.APIKey == "" {
+				record.State = accountstore.StateReauthRequired
+				pool.accounts = append(pool.accounts, &account{record: record})
+				continue
+			}
+			source, err := codexauth.NewStatic(
+				jitteredAuthConfig(authConfig, record.ID),
+				record.APIKey,
+				record.AccountID,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("codexpool: load account %q: %w", record.Name, err)
+			}
+			pool.accounts = append(pool.accounts, &account{
+				record: record,
+				source: source,
+			})
 			continue
 		}
 		if record.RefreshToken == "" {
@@ -282,6 +307,118 @@ func (pool *Pool) Add(
 	return record, nil
 }
 
+// AddAPIKey inserts a new static API-key account into the running pool and
+// store. accountID is optional upstream account metadata.
+func (pool *Pool) AddAPIKey(
+	ctx context.Context,
+	name string,
+	apiKey string,
+	accountID string,
+) (accountstore.Account, error) {
+	if err := accountstore.ValidateName(name); err != nil {
+		return accountstore.Account{}, err
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return accountstore.Account{}, errors.New("codexpool: API key is required")
+	}
+	source, err := codexauth.NewStatic(jitteredAuthConfig(pool.authConfig, name), apiKey, accountID)
+	if err != nil {
+		return accountstore.Account{}, err
+	}
+	pool.mu.Lock()
+	for _, existing := range pool.accounts {
+		if existing.record.Name == name {
+			pool.mu.Unlock()
+			return accountstore.Account{}, fmt.Errorf("codexpool: account name %q already exists", name)
+		}
+	}
+	pool.mu.Unlock()
+	id, err := accountstore.NewAccountID()
+	if err != nil {
+		return accountstore.Account{}, err
+	}
+	now := time.Now().UTC()
+	record := accountstore.Account{
+		ID:        id,
+		Provider:  pool.provider,
+		Name:      name,
+		AccountID: strings.TrimSpace(accountID),
+		AuthMode:  accountstore.AuthModeAPIKey,
+		APIKey:    apiKey,
+		State:     accountstore.StateActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := pool.store.Put(ctx, record); err != nil {
+		return accountstore.Account{}, err
+	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountAdded,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
+	pool.mu.Lock()
+	pool.accounts = append(pool.accounts, &account{
+		record: record,
+		source: source,
+	})
+	pool.mu.Unlock()
+	return record, nil
+}
+
+// SetAPIKey replaces an existing API-key account's key. A non-empty accountID
+// updates the stored upstream account metadata.
+func (pool *Pool) SetAPIKey(ctx context.Context, name, apiKey, accountID string) error {
+	if err := accountstore.ValidateName(name); err != nil {
+		return err
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return errors.New("codexpool: API key is required")
+	}
+	pool.mu.Lock()
+	target := pool.accountByNameLocked(name)
+	if target == nil {
+		pool.mu.Unlock()
+		return accountstore.ErrNotFound
+	}
+	record := target.record
+	pool.mu.Unlock()
+	if record.AuthMode != accountstore.AuthModeAPIKey {
+		return fmt.Errorf("codexpool: %s account %q is not an API-key account", pool.provider, name)
+	}
+	if accountID = strings.TrimSpace(accountID); accountID != "" {
+		record.AccountID = accountID
+	}
+	source, err := codexauth.NewStatic(jitteredAuthConfig(pool.authConfig, name), apiKey, record.AccountID)
+	if err != nil {
+		return err
+	}
+	record.APIKey = apiKey
+	record.State = accountstore.StateActive
+	record.UpdatedAt = time.Now().UTC()
+	if err := pool.store.Put(ctx, record); err != nil {
+		return err
+	}
+	pool.recordAudit(ctx, accountstore.AuditEvent{
+		Action:      accountstore.AuditAccountReauthenticated,
+		Provider:    record.Provider,
+		RecordID:    record.ID,
+		AccountName: record.Name,
+		State:       record.State,
+	})
+	pool.mu.Lock()
+	target.record = record
+	target.source = source
+	target.cooldownUntil = time.Time{}
+	pool.unbindAccountLocked(record.ID)
+	pool.mu.Unlock()
+	return nil
+}
+
 // Reauth replaces an account's OAuth credentials after verifying that the
 // browser session returned the same upstream account.
 func (pool *Pool) Reauth(
@@ -378,6 +515,7 @@ func (pool *Pool) Accounts() []accountstore.Account {
 	for _, item := range pool.accounts {
 		record := item.record
 		record.RefreshToken = ""
+		record.APIKey = ""
 		records = append(records, record)
 	}
 	return records
@@ -449,6 +587,7 @@ func (pool *Pool) Acquire(
 			lease := Lease{
 				AccountID:   id,
 				AccountName: item.record.Name,
+				AuthMode:    item.record.AuthMode,
 				InFlight:    item.inFlight,
 				Token:       token,
 			}
@@ -564,12 +703,13 @@ func (pool *Pool) rankLocked(item *account, index int) int {
 // AccountStatus describes one account for status views. It contains no
 // credentials.
 type AccountStatus struct {
-	Name          string             `json:"name"`
-	State         accountstore.State `json:"state"`
-	InFlight      int                `json:"in_flight"`
-	CooldownUntil *time.Time         `json:"cooldown_until,omitempty"`
-	RateLimited   bool               `json:"rate_limited,omitempty"`
-	Reason        string             `json:"reason,omitempty"`
+	Name          string                `json:"name"`
+	AuthMode      accountstore.AuthMode `json:"auth_mode,omitempty"`
+	State         accountstore.State    `json:"state"`
+	InFlight      int                   `json:"in_flight"`
+	CooldownUntil *time.Time            `json:"cooldown_until,omitempty"`
+	RateLimited   bool                  `json:"rate_limited,omitempty"`
+	Reason        string                `json:"reason,omitempty"`
 }
 
 // Status describes a provider's pool for status views.
@@ -604,6 +744,7 @@ func (pool *Pool) Status() Status {
 	for index, item := range pool.accounts {
 		account := AccountStatus{
 			Name:     item.record.Name,
+			AuthMode: item.record.AuthMode,
 			State:    item.record.State,
 			InFlight: item.inFlight,
 		}
@@ -669,6 +810,7 @@ func (pool *Pool) ForceRefresh(ctx context.Context, id string) (Lease, error) {
 	lease := Lease{
 		AccountID:   id,
 		AccountName: item.record.Name,
+		AuthMode:    item.record.AuthMode,
 		InFlight:    item.inFlight,
 		Token:       token,
 	}

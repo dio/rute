@@ -63,6 +63,35 @@ func TestCatalogResolveAndList(t *testing.T) {
 	}
 }
 
+func TestCatalogRoutesCommandCode(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "models.json")
+	body := `[{"id":"cc-sonnet","provider":"commandcode","upstream_model":"claude-sonnet-4-6"}]`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write catalog: %v", err)
+	}
+	catalog, err := Load(path)
+	if err != nil {
+		t.Fatalf("load catalog: %v", err)
+	}
+	tests := []struct {
+		model    string
+		upstream string
+	}{
+		{model: "cc-sonnet", upstream: "claude-sonnet-4-6"},
+		{model: "commandcode/deepseek/deepseek-v4-flash", upstream: "deepseek/deepseek-v4-flash"},
+	}
+	for _, test := range tests {
+		resolution, err := catalog.Resolve(test.model, "gpt-default")
+		if err != nil {
+			t.Fatalf("resolve %q: %v", test.model, err)
+		}
+		if resolution.Provider != "commandcode" || resolution.UpstreamModel != test.upstream {
+			t.Errorf("resolution for %q = %+v", test.model, resolution)
+		}
+	}
+}
+
 func TestCatalogRejectsInvalidMappings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
