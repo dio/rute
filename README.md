@@ -437,9 +437,11 @@ dashboard that refreshes every five seconds and shows:
 **Add account** and **log in again** run the same login as `rute account add`
 and `rute account reauth` — the browser OAuth flow for Codex and Claude, and
 the Command Code browser login that provisions an API key — and the account
-joins the running pool without a restart. Each account row shows its auth mode
-(`oauth` or `api key`). Adding an API key you already have, and removing
-accounts, stay in the CLI.
+joins the running pool without a restart. The form also takes an optional API
+key: paste one to store an API-key account for any provider, or leave it blank
+to authorize in the browser. Each account row shows its auth mode (`oauth` or
+`api key`), offers **log in again** for OAuth accounts and **replace key** for
+API-key accounts, and removing accounts stays in the CLI.
 
 **change routing** sets a provider's balance mode, account order, and max in
 flight, with the same rules as the `-<provider>-balance`,
@@ -716,30 +718,35 @@ Set `RUTE_DOWNSTREAM_KEY` to any non-empty placeholder. Codex CLI requires the
 provider credential setting, but `rute` ignores the downstream Authorization
 header. Set `supports_websockets = false` to use HTTP SSE instead.
 
-### API keys and Command Code
+### API keys
 
-Claude and Codex use subscription OAuth, but some providers authenticate with a
-static API key. rute supports API-key accounts alongside subscription accounts;
-each account is one or the other, and the pool balances across both.
-
-Command Code is an API-key provider. Add an account with a key you created in
-Command Code Studio, read it from an environment variable, or omit the key to
-log in through the browser — the same flow `cmd login` uses, which provisions a
-key:
+An account authenticates one of two ways: a subscription (OAuth for Codex and
+Claude, or the Command Code browser login) or a static API key. The two coexist
+per account, and the pool balances and fails over across both. Add an API-key
+account with a key you have, or read it from an environment variable:
 
 ```sh
+rute account add -provider=codex -name=api -api-key-env=OPENAI_API_KEY
+rute account add -provider=claude -name=api -api-key-env=ANTHROPIC_API_KEY
 rute account add -provider=commandcode -name=work -api-key=COMMANDCODE_KEY
-rute account add -provider=commandcode -name=work -api-key-env=COMMANDCODE_API_KEY
-rute account add -provider=commandcode -name=work
-rute account list -provider=commandcode
-rute account reauth -provider=commandcode work
-rute account remove -provider=commandcode work
+rute account reauth -provider=claude api            # replace the key
+rute account list                                   # shows each account's auth mode
 ```
 
-The Command Code provider serves the Anthropic Messages, OpenAI Responses, and
-OpenAI Chat Completions endpoints at
-`https://api.commandcode.ai/provider/v1`. Route a model to it with the
-`commandcode/` prefix: `commandcode/claude-sonnet-4-6` on `/v1/messages`, and
+An API-key account goes to the provider's API endpoint, not the subscription
+backend:
+
+| Provider | Subscription | API key |
+| --- | --- | --- |
+| codex | `chatgpt.com/backend-api/codex/responses` (`Authorization: Bearer`) | `api.openai.com/v1/responses` (`Authorization: Bearer`) |
+| claude | `api.anthropic.com/v1/messages` (`Authorization: Bearer`, OAuth beta) | `api.anthropic.com/v1/messages` (`x-api-key`) |
+| commandcode | — (API key only) | `api.commandcode.ai/provider/v1` (`Authorization: Bearer`) |
+
+Command Code accounts are API-key only. Supply the key with `-api-key` or
+`-api-key-env`, or omit both to log in through the browser, which provisions a
+key. It serves the Anthropic Messages, OpenAI Responses, and OpenAI Chat
+Completions endpoints; route a model to it with the `commandcode/` prefix, as
+in `commandcode/claude-sonnet-4-6` on `/v1/messages` or
 `commandcode/deepseek/deepseek-v4-flash` on `/v1/responses` and
 `/v1/chat/completions`. Claude models are served on `/v1/messages` only, and
 OpenAI and open models on `/v1/responses` and `/v1/chat/completions`; a model
@@ -747,8 +754,8 @@ sent to the wrong endpoint is passed through as Command Code's own `400`.
 
 API keys are stored like refresh tokens: the native keyring by default, or a
 `0600` JSON file with `-credential-store=file`. They are secrets; never commit
-or log them. The dashboard can add a Command Code account through the browser
-login; supplying a key you already have, and rotating keys, stay in the CLI.
+or log them. The dashboard's add form takes an optional API key, so keys can be
+pasted there too; use the CLI for scripted provisioning.
 
 ### Running the Command Code CLI through rute
 

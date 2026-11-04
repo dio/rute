@@ -33,6 +33,8 @@ const (
 type Lease struct {
 	AccountID   string
 	AccountName string
+	// AuthMode is how the selected account authenticates upstream.
+	AuthMode accountstore.AuthMode
 	// InFlight counts the account's leased calls when this lease was
 	// acquired, including this one.
 	InFlight int
@@ -585,6 +587,7 @@ func (pool *Pool) Acquire(
 			lease := Lease{
 				AccountID:   id,
 				AccountName: item.record.Name,
+				AuthMode:    item.record.AuthMode,
 				InFlight:    item.inFlight,
 				Token:       token,
 			}
@@ -807,6 +810,7 @@ func (pool *Pool) ForceRefresh(ctx context.Context, id string) (Lease, error) {
 	lease := Lease{
 		AccountID:   id,
 		AccountName: item.record.Name,
+		AuthMode:    item.record.AuthMode,
 		InFlight:    item.inFlight,
 		Token:       token,
 	}

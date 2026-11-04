@@ -24,6 +24,9 @@ const (
 	APIVersion       = "2023-06-01"
 	OAuthCapability  = "oauth-2025-04-20"
 
+	// APIURL is the Anthropic Messages endpoint, used by API-key accounts.
+	APIURL = "https://api.anthropic.com/v1/messages"
+
 	maxTokenResponse = 1 << 20
 )
 

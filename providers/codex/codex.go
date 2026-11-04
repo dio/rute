@@ -19,6 +19,9 @@ const (
 	// ResponsesURL is the Codex Responses upstream used by the Codex CLI.
 	ResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
 
+	// APIURL is the OpenAI Responses endpoint, used by API-key accounts.
+	APIURL = "https://api.openai.com/v1/responses"
+
 	// Originator identifies requests as coming from the Codex CLI protocol.
 	Originator = "codex_cli_rs"
 

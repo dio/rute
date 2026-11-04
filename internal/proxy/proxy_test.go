@@ -21,6 +21,7 @@ import (
 type staticCredentials struct {
 	mu           sync.Mutex
 	token        codexauth.Token
+	authMode     accountstore.AuthMode
 	forceRefresh int
 	rateLimited  int
 	acquired     int
@@ -35,7 +36,11 @@ func (credentials *staticCredentials) Acquire(
 	credentials.mu.Lock()
 	defer credentials.mu.Unlock()
 	credentials.acquired++
-	return codexpool.Lease{AccountID: "static", Token: credentials.token}, nil
+	return codexpool.Lease{
+		AccountID: "static",
+		AuthMode:  credentials.authMode,
+		Token:     credentials.token,
+	}, nil
 }
 
 func (credentials *staticCredentials) Release(string) {
@@ -52,7 +57,11 @@ func (credentials *staticCredentials) ForceRefresh(
 	defer credentials.mu.Unlock()
 	credentials.forceRefresh++
 	credentials.token.AccessToken = "refreshed-token"
-	return codexpool.Lease{AccountID: "static", Token: credentials.token}, nil
+	return codexpool.Lease{
+		AccountID: "static",
+		AuthMode:  credentials.authMode,
+		Token:     credentials.token,
+	}, nil
 }
 
 func (credentials *staticCredentials) MarkRateLimited(string, time.Time, string) {

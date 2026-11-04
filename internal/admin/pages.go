@@ -53,6 +53,8 @@ type accountView struct {
 	WaitP50   string
 	Rate      string
 	CanReauth bool
+	// CanReplaceKey offers adding or replacing a stored API key.
+	CanReplaceKey bool
 }
 
 func authLabel(mode accountstore.AuthMode) string {
@@ -187,12 +189,15 @@ func providerRow(status codexpool.Status, accounts map[string]*callstore.Counter
 			WaitP50:  "-",
 			Rate:     "-",
 		}
+		if account.AuthMode == accountstore.AuthModeAPIKey {
+			row.CanReplaceKey = true
+		}
 		switch {
 		case account.State == accountstore.StateReauthRequired:
 			reauth++
 			row.State = "needs login"
 			row.Attention = true
-			row.CanReauth = true
+			row.CanReauth = account.AuthMode != accountstore.AuthModeAPIKey
 		case account.CooldownUntil != nil:
 			cooling++
 			row.State = "cooling until " + formatClock(*account.CooldownUntil)
@@ -260,18 +265,26 @@ type newAccountView struct {
 	Providers []string
 	Provider  string
 	Name      string
+	Action    string
 	Error     string
 }
 
 func (server *Server) handleNewAccount(writer http.ResponseWriter, request *http.Request) {
+	action := request.URL.Query().Get("action")
+	if action != ActionReauth {
+		action = ActionAdd
+	}
 	server.render(writer, "new_account.html", newAccountView{
 		CSRF:      server.csrf,
 		Providers: server.providers(),
 		Provider:  request.URL.Query().Get("provider"),
+		Name:      strings.TrimSpace(request.URL.Query().Get("name")),
+		Action:    action,
 	})
 }
 
-// handleAccountForm starts an add or reauth login from an HTML form.
+// handleAccountForm starts an add or reauth, from an HTML form. A pasted API
+// key stores an API-key account directly; an empty key starts a browser login.
 func (server *Server) handleAccountForm(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxFormBytes)
 	if err := request.ParseForm(); err != nil || !server.checkCSRF(request) {
@@ -281,19 +294,36 @@ func (server *Server) handleAccountForm(writer http.ResponseWriter, request *htt
 	provider := request.PostFormValue("provider")
 	name := strings.TrimSpace(request.PostFormValue("name"))
 	action := request.PostFormValue("action")
+	if action == "" {
+		action = ActionAdd
+	}
 	if !validProvider(provider) {
 		provider = ""
 	}
-	login, err := server.logins.begin(provider, name, action)
-	if err != nil {
+	renderError := func(message string) {
 		writer.WriteHeader(http.StatusBadRequest)
 		server.render(writer, "new_account.html", newAccountView{
 			CSRF:      server.csrf,
 			Providers: server.providers(),
 			Provider:  provider,
 			Name:      name,
-			Error:     err.Error(),
+			Action:    action,
+			Error:     message,
 		})
+	}
+
+	if apiKey := strings.TrimSpace(request.PostFormValue("api_key")); apiKey != "" {
+		if _, err := server.logins.putKey(provider, name, action, apiKey); err != nil {
+			renderError(err.Error())
+			return
+		}
+		http.Redirect(writer, request, "/", http.StatusSeeOther)
+		return
+	}
+
+	login, err := server.logins.begin(provider, name, action)
+	if err != nil {
+		renderError(err.Error())
 		return
 	}
 	http.Redirect(writer, request, "/logins/"+login.ID, http.StatusSeeOther)

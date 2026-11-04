@@ -145,12 +145,17 @@ func TestParseAccountOptionsCommandCode(t *testing.T) {
 		t.Errorf("options = %+v", opts)
 	}
 
-	if _, err := parseAccountOptions(
-		[]string{"add", "-provider=codex", "-name=work", "-api-key=secret"},
+	opts, err = parseAccountOptions(
+		[]string{"add", "-provider=claude", "-name=work", "-api-key-env=ANTHROPIC_API_KEY"},
 		new(bytes.Buffer),
-	); err == nil {
-		t.Fatal("api key accepted for the codex provider")
+	)
+	if err != nil {
+		t.Fatalf("parse claude api-key-env options: %v", err)
 	}
+	if opts.provider != "claude" || opts.apiKeyEnv != "ANTHROPIC_API_KEY" {
+		t.Errorf("options = %+v", opts)
+	}
+
 	if _, err := parseAccountOptions(
 		[]string{"add", "-provider=commandcode", "-name=work", "-api-key=a", "-api-key-env=B"},
 		new(bytes.Buffer),

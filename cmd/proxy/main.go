@@ -1017,13 +1017,13 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			&opts.apiKey,
 			"api-key",
 			"",
-			"API key for an API-key provider (commandcode); omit to log in via the browser",
+			"static API key; omit to authorize in the browser (Command Code) or with OAuth (Codex, Claude)",
 		)
 		flags.StringVar(
 			&opts.apiKeyEnv,
 			"api-key-env",
 			"",
-			"environment variable holding the API key (commandcode)",
+			"environment variable holding the API key",
 		)
 	}
 	if opts.action == "history" {
@@ -1081,13 +1081,6 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 	}
 	if opts.apiKey != "" && opts.apiKeyEnv != "" {
 		return accountOptions{}, errors.New("use either -api-key or -api-key-env, not both")
-	}
-	if (opts.action == "add" || opts.action == "reauth") &&
-		(opts.apiKey != "" || opts.apiKeyEnv != "") &&
-		opts.provider != accountstore.ProviderCommandCode {
-		return accountOptions{}, errors.New(
-			"-api-key and -api-key-env are only supported for the commandcode provider",
-		)
 	}
 	if opts.action == "history" && opts.output != "table" && opts.output != "json" {
 		return accountOptions{}, errors.New("output must be table or json")

@@ -302,6 +302,7 @@ type loginRequest struct {
 	Provider string `json:"provider"`
 	Name     string `json:"name"`
 	Action   string `json:"action"`
+	APIKey   string `json:"api_key"`
 }
 
 // handleLoginAPI starts a login. Requiring a JSON body means a cross-site
@@ -322,7 +323,17 @@ func (server *Server) handleLoginAPI(writer http.ResponseWriter, request *http.R
 	if body.Action == "" {
 		body.Action = ActionAdd
 	}
-	login, err := server.logins.begin(body.Provider, strings.TrimSpace(body.Name), body.Action)
+	name := strings.TrimSpace(body.Name)
+	if strings.TrimSpace(body.APIKey) != "" {
+		login, err := server.logins.putKey(body.Provider, name, body.Action, body.APIKey)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, login)
+		return
+	}
+	login, err := server.logins.begin(body.Provider, name, body.Action)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errLoginInProgress) {

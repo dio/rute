@@ -51,6 +51,10 @@ type CredentialSource interface {
 type Config struct {
 	UpstreamURL       string
 	ClaudeUpstreamURL string
+	// CodexAPIURL and ClaudeAPIURL are the API endpoints used by API-key
+	// accounts for those providers.
+	CodexAPIURL  string
+	ClaudeAPIURL string
 	// CommandCodeUpstreamURL overrides the Command Code Provider API base URL.
 	// The wire endpoints are appended to it.
 	CommandCodeUpstreamURL string
@@ -107,6 +111,18 @@ func NewMulti(cfg Config, sources map[string]CredentialSource) (*Handler, error)
 		cfg.ClaudeUpstreamURL = claude.MessagesURL
 	}
 	if err := validateUpstreamURL(cfg.ClaudeUpstreamURL); err != nil {
+		return nil, err
+	}
+	if cfg.CodexAPIURL == "" {
+		cfg.CodexAPIURL = codex.APIURL
+	}
+	if err := validateUpstreamURL(cfg.CodexAPIURL); err != nil {
+		return nil, err
+	}
+	if cfg.ClaudeAPIURL == "" {
+		cfg.ClaudeAPIURL = claude.APIURL
+	}
+	if err := validateUpstreamURL(cfg.ClaudeAPIURL); err != nil {
 		return nil, err
 	}
 	commandCodeBase := strings.TrimRight(cfg.CommandCodeUpstreamURL, "/")
@@ -271,7 +287,7 @@ func (handler *Handler) codexAttempts(
 			return nil, err
 		}
 		call.acquired(lease)
-		response, err := handler.doUpstream(ctx, payload, sessionID, lease.Token)
+		response, err := handler.doUpstream(ctx, payload, sessionID, lease.AuthMode, lease.Token)
 		if err != nil {
 			return nil, err
 		}
@@ -287,7 +303,7 @@ func (handler *Handler) codexAttempts(
 				call.retry()
 				continue
 			}
-			response, err = handler.doUpstream(ctx, payload, sessionID, refreshed.Token)
+			response, err = handler.doUpstream(ctx, payload, sessionID, refreshed.AuthMode, refreshed.Token)
 			if err != nil {
 				return nil, err
 			}
@@ -461,25 +477,32 @@ func (handler *Handler) doUpstream(
 	ctx context.Context,
 	payload []byte,
 	sessionID string,
+	authMode accountstore.AuthMode,
 	token codexauth.Token,
 ) (*http.Response, error) {
+	url := handler.config.UpstreamURL
+	if authMode == accountstore.AuthModeAPIKey {
+		url = handler.config.CodexAPIURL
+	}
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		handler.config.UpstreamURL,
+		url,
 		bytes.NewReader(payload),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: create upstream request: %w", err)
 	}
-	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("originator", codex.Originator)
-	request.Header.Set("session_id", sessionID)
-	request.Header.Set("User-Agent", codex.UserAgent)
-	if token.AccountID != "" {
-		request.Header.Set("ChatGPT-Account-ID", token.AccountID)
+	if authMode != accountstore.AuthModeAPIKey {
+		request.Header.Set("Accept", "text/event-stream")
+		request.Header.Set("originator", codex.Originator)
+		request.Header.Set("session_id", sessionID)
+		request.Header.Set("User-Agent", codex.UserAgent)
+		if token.AccountID != "" {
+			request.Header.Set("ChatGPT-Account-ID", token.AccountID)
+		}
 	}
 
 	response, err := handler.config.HTTPClient.Do(request)

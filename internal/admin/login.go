@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,13 +137,14 @@ type logins struct {
 	order []string
 }
 
-func (manager *logins) begin(provider, name, action string) (Login, error) {
+// target validates an add or reauth against a provider's pool and returns it.
+func (manager *logins) target(provider, name, action string) (*codexpool.Pool, error) {
 	pool := manager.pools[provider]
 	if pool == nil {
-		return Login{}, fmt.Errorf("provider %q is not available", provider)
+		return nil, fmt.Errorf("provider %q is not available", provider)
 	}
 	if err := accountstore.ValidateName(name); err != nil {
-		return Login{}, err
+		return nil, err
 	}
 	exists := false
 	for _, account := range pool.Accounts() {
@@ -153,14 +155,52 @@ func (manager *logins) begin(provider, name, action string) (Login, error) {
 	switch action {
 	case ActionAdd:
 		if exists {
-			return Login{}, fmt.Errorf("%s account %q already exists; reauthenticate it instead", provider, name)
+			return nil, fmt.Errorf("%s account %q already exists; reauthenticate it instead", provider, name)
 		}
 	case ActionReauth:
 		if !exists {
-			return Login{}, fmt.Errorf("%s account %q does not exist", provider, name)
+			return nil, fmt.Errorf("%s account %q does not exist", provider, name)
 		}
 	default:
-		return Login{}, fmt.Errorf("action must be %s or %s", ActionAdd, ActionReauth)
+		return nil, fmt.Errorf("action must be %s or %s", ActionAdd, ActionReauth)
+	}
+	return pool, nil
+}
+
+// putKey adds or replaces an API-key account without a browser login.
+func (manager *logins) putKey(provider, name, action, apiKey string) (Login, error) {
+	pool, err := manager.target(provider, name, action)
+	if err != nil {
+		return Login{}, err
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return Login{}, errors.New("an API key is required")
+	}
+	ctx := context.Background()
+	if action == ActionAdd {
+		if _, err := pool.AddAPIKey(ctx, name, apiKey, ""); err != nil {
+			return Login{}, err
+		}
+	} else if err := pool.SetAPIKey(ctx, name, apiKey, ""); err != nil {
+		return Login{}, err
+	}
+	now := time.Now().UTC()
+	return Login{
+		ID:        randomID(),
+		Provider:  provider,
+		Name:      name,
+		Action:    action,
+		State:     LoginDone,
+		StartedAt: now,
+		ExpiresAt: now,
+	}, nil
+}
+
+func (manager *logins) begin(provider, name, action string) (Login, error) {
+	pool, err := manager.target(provider, name, action)
+	if err != nil {
+		return Login{}, err
 	}
 
 	manager.mu.Lock()

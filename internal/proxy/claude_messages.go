@@ -146,6 +146,7 @@ func (handler *Handler) claudeAttempts(
 			ctx,
 			payload,
 			downstreamHeaders,
+			lease.AuthMode,
 			lease.Token.AccessToken,
 		)
 		if err != nil {
@@ -167,6 +168,7 @@ func (handler *Handler) claudeAttempts(
 				ctx,
 				payload,
 				downstreamHeaders,
+				refreshed.AuthMode,
 				refreshed.Token.AccessToken,
 			)
 			if err != nil {
@@ -196,12 +198,17 @@ func (handler *Handler) doClaudeUpstream(
 	ctx context.Context,
 	payload []byte,
 	downstreamHeaders http.Header,
+	authMode accountstore.AuthMode,
 	accessToken string,
 ) (*http.Response, error) {
+	url := handler.config.ClaudeUpstreamURL
+	if authMode == accountstore.AuthModeAPIKey {
+		url = handler.config.ClaudeAPIURL
+	}
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		handler.config.ClaudeUpstreamURL,
+		url,
 		bytes.NewReader(payload),
 	)
 	if err != nil {
@@ -219,18 +226,24 @@ func (handler *Handler) doClaudeUpstream(
 	}
 	request.Header.Del("Authorization")
 	request.Header.Del("X-Api-Key")
-	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("Content-Type", "application/json")
+	if authMode == accountstore.AuthModeAPIKey {
+		request.Header.Set("X-Api-Key", accessToken)
+	} else {
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	if request.Header.Get("Accept") == "" {
 		request.Header.Set("Accept", "application/json, text/event-stream")
 	}
 	if request.Header.Get("Anthropic-Version") == "" {
 		request.Header.Set("Anthropic-Version", claude.APIVersion)
 	}
-	request.Header.Set(
-		"Anthropic-Beta",
-		mergeHeaderToken(request.Header.Get("Anthropic-Beta"), claude.OAuthCapability),
-	)
+	if authMode != accountstore.AuthModeAPIKey {
+		request.Header.Set(
+			"Anthropic-Beta",
+			mergeHeaderToken(request.Header.Get("Anthropic-Beta"), claude.OAuthCapability),
+		)
+	}
 	response, err := handler.config.HTTPClient.Do(request)
 	if err != nil {
 		return nil, err
