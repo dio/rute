@@ -1,0 +1,20 @@
+{{template "head"}}
+<title>rute · add account</title>
+</head>
+<body>
+<header><b><a href="/">rute</a></b><span>add account</span></header>
+<form method="post" action="/accounts" class="box">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="action" value="add">
+  <label for="provider">provider</label>
+  <select id="provider" name="provider">
+    {{range .Providers}}<option value="{{.}}"{{if eq . $.Provider}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <label for="name">account name</label>
+  <input id="name" name="name" value="{{.Name}}" required autofocus>
+  <p class="muted">rute shows a sign-in link next. Sign in with the subscription you want to add; check which account your browser is signed in to first.</p>
+  {{if .Error}}<p class="attention">{{.Error}}</p>{{end}}
+  <button>start login</button>
+</form>
+</body>
+</html>

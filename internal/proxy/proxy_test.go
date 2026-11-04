@@ -55,7 +55,7 @@ func (credentials *staticCredentials) ForceRefresh(
 	return codexpool.Lease{AccountID: "static", Token: credentials.token}, nil
 }
 
-func (credentials *staticCredentials) MarkRateLimited(string, time.Time) {
+func (credentials *staticCredentials) MarkRateLimited(string, time.Time, string) {
 	credentials.mu.Lock()
 	defer credentials.mu.Unlock()
 	credentials.rateLimited++

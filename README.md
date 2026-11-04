@@ -325,6 +325,88 @@ queue or reject them. `priority` requires a `-*-max-in-flight` limit.
 The limits above are a starting point from one set of agent benchmarks.
 Measure your own with the tools below.
 
+### Management dashboard and API
+
+`rute serve` also listens on `127.0.0.1:20129` for management. Open
+http://127.0.0.1:20129 for a dashboard that refreshes every five seconds and
+shows:
+
+- each provider's balance mode and account counts;
+- each account's state, cooldown end and reason (for example `seven_day`),
+  calls in flight, and call statistics;
+- calls grouped by calls in flight, for the last 15 minutes, hour, day, or
+  week; and
+- the most recent calls.
+
+**Add account** and **log in again** run the same OAuth login as
+`rute account add` and `rute account reauth`, and the account joins the
+running pool without a restart. Removing accounts stays in the CLI.
+
+**change routing** sets a provider's balance mode, account order, and max in
+flight, with the same rules as the `-<provider>-balance`,
+`-<provider>-account-order`, and `-<provider>-max-in-flight` flags. The change
+applies to new calls at once and lasts until rute restarts. To keep it, set
+the flags too.
+
+The same data is available as JSON:
+
+| Request | Returns |
+| --- | --- |
+| `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts |
+| `GET /v1/calls/summary?window=1h` | call statistics by account and calls in flight (`15m`, `1h`, `24h`, `7d`) |
+| `GET /v1/calls/recent?limit=50` | the newest calls |
+| `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
+| `GET /v1/logins/{id}` | the login's `state`: `pending`, `done`, or `failed` |
+| `GET /v1/usage?window=7d&by=day` | tokens and estimated cost per period, account, and model (`window`: `24h`, `7d`, `30d`; `by`: `hour`, `day`, `total`) |
+| `PUT /v1/providers/claude/routing` with `{"balance":"priority","order":["default","personal"],"max_in_flight":6}` | the provider's new status; invalid routing returns 400 and changes nothing |
+
+The management port never contains credentials, but it can add accounts, so
+it is loopback-only and separate from the proxy port. Do not forward it with
+Tailscale Serve. It rejects requests whose `Host` is not a loopback name, the
+dashboard's forms carry a per-process token, and the `POST` and `PUT` API
+requests require a JSON body. Use `-admin-listen=127.0.0.1:PORT` to move it or
+`-admin-listen=off` to disable it.
+
+#### Usage and estimated cost
+
+http://127.0.0.1:20129/usage reports calls and tokens per account and
+model, and per hour or day, for the last 24 hours, 7 days, or 30 days. Tokens
+are split into input, output, cache read, and cache write, as the provider
+reports them. Input excludes cache reads, so each kind can be priced on its
+own. `rute stats -usage=day -window=168h` prints the same report.
+
+Neither provider returns a price, and subscriptions are not billed per token.
+To see what the same tokens would cost on the API, list per-million-token
+rates in `prices.json` in the state directory (or pass `-prices=PATH`). Take
+the rates from the provider's pricing page. A name ending in `*` matches a
+model family, and the longest match wins:
+
+```json
+{
+  "models": {
+    "example-model-*": { "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25 }
+  }
+}
+```
+
+rute reloads the file when it changes. Models without a rate show `-` and are
+listed under the report.
+
+Call history is stored as per-minute counters in `metrics.db` in rute's state
+directory (`~/Library/Application Support/rute/` on macOS,
+`~/.local/state/rute/` on Linux). Each row counts calls, outcomes, failovers,
+and tokens for one account, model, and calls-in-flight range, with histograms
+for wait and tokens per second. Prompts, responses, and individual calls are
+never written to disk, so the file stays small. Wait and tok/s percentiles are
+estimates from the histograms.
+
+Counters are written every 10 seconds and kept for 30 days
+(`-metrics-retention`). `-metrics-db=PATH` moves the file and
+`-metrics-db=off` disables it. `rute stats` without file arguments reads the
+same database. The dashboard's recent-calls list holds the last 1000 calls in
+memory and starts empty after a restart. For per-call records, use
+`-metrics-file`.
+
 ### Measuring latency under concurrency
 
 `-metrics-file` appends one JSON line per inference call. A line contains the

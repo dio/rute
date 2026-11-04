@@ -1,0 +1,72 @@
+{{template "head"}}
+{{if .Refresh.Seconds}}<meta http-equiv="refresh" content="{{.Refresh.Seconds}}">{{end}}
+<title>rute</title>
+</head>
+<body>
+<header>
+  <b>rute</b>
+  <span class="muted">version {{.Version}} · running for {{.Uptime}}</span>
+  {{range .Providers}}<span>{{.Name}}: {{.Summary}}</span>{{end}}
+  <a href="/usage">usage</a>
+  <nav class="right">refresh {{range .Refreshes}}<a href="/?window={{$.Window}}&amp;refresh={{.Name}}"{{if eq .Name $.Refresh.Name}} class="on"{{end}}>{{.Name}}</a>{{end}}</nav>
+</header>
+
+<h2>Accounts</h2>
+{{range .Providers}}
+<h3>{{.Name}} <span class="muted">· {{.Balance}}</span> <a href="/providers/{{.Name}}/routing">change routing</a></h3>
+<div class="scroll"><table>
+  <tr><th>account</th><th>state</th><th class="n">in flight</th><th class="n">calls</th><th class="n">ok</th><th class="n">429</th><th class="n">failovers</th><th class="n">wait p50</th><th class="n">tok/s p50</th><th></th></tr>
+  {{range .Accounts}}
+  <tr>
+    <td>{{.Name}}</td>
+    <td{{if .Attention}} class="attention"{{end}}>{{.State}}</td>
+    <td class="n">{{.InFlight}}</td>
+    <td class="n">{{.Calls}}</td>
+    <td class="n">{{.OK}}</td>
+    <td class="n">{{.Limited}}</td>
+    <td class="n">{{.Failover}}</td>
+    <td class="n">{{.WaitP50}}</td>
+    <td class="n">{{.Rate}}</td>
+    <td>{{if .CanReauth}}<form class="inline" method="post" action="/accounts">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <input type="hidden" name="provider" value="{{.Provider}}">
+      <input type="hidden" name="name" value="{{.Name}}">
+      <input type="hidden" name="action" value="reauth">
+      <button>log in again</button></form>{{end}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="10" class="muted">no accounts</td></tr>
+  {{end}}
+</table></div>
+<p><a href="/accounts/new?provider={{.Name}}">add {{.Name}} account</a></p>
+{{end}}
+
+<h2>Calls by calls in flight</h2>
+<nav>{{range .Windows}}<a href="/?window={{.}}&amp;refresh={{$.Refresh.Name}}"{{if eq . $.Window}} class="on"{{end}}>{{.}}</a>{{end}}</nav>
+{{if not .History}}
+<p class="muted">Call history is disabled.</p>
+{{else if .Error}}
+<p class="attention">{{.Error}}</p>
+{{else}}
+{{if .Partial}}<p class="muted">{{.Partial}}</p>{{end}}
+<div class="scroll"><table>
+  <tr><th>account</th><th class="n">in flight</th><th class="n">calls</th><th class="n">ok</th><th class="n">429</th><th class="n">failovers</th><th class="n">cancel</th><th class="n">error</th><th class="n">wait p50</th><th class="n">wait p90</th><th class="n">tok/s p50</th><th class="n">mean call</th></tr>
+  {{range .Latency}}
+  <tr><td>{{.Account}}</td><td class="n">{{.InFlight}}</td><td class="n">{{.Calls}}</td><td class="n">{{.OK}}</td><td class="n">{{.Limited}}</td><td class="n">{{.Failover}}</td><td class="n">{{.Canceled}}</td><td class="n">{{.Errors}}</td><td class="n">{{.WaitP50}}</td><td class="n">{{.WaitP90}}</td><td class="n">{{.Rate}}</td><td class="n">{{.MeanCall}}</td></tr>
+  {{else}}
+  <tr><td colspan="12" class="muted">no calls in the last {{.Window}}</td></tr>
+  {{end}}
+</table></div>
+
+<h2>Recent calls <span class="muted">· since start, not stored</span></h2>
+<div class="scroll"><table>
+  <tr><th>time</th><th>provider</th><th>account</th><th>endpoint</th><th>outcome</th><th class="n">wait</th><th class="n">duration</th><th class="n">output tokens</th></tr>
+  {{range .Recent}}
+  <tr><td>{{.Time}}</td><td>{{.Provider}}</td><td>{{.Account}}</td><td>{{.Endpoint}}</td><td{{if .Failed}} class="attention"{{end}}>{{.Outcome}}</td><td class="n">{{.Wait}}</td><td class="n">{{.Duration}}</td><td class="n">{{.Tokens}}</td></tr>
+  {{else}}
+  <tr><td colspan="8" class="muted">no calls yet</td></tr>
+  {{end}}
+</table></div>
+{{end}}
+</body>
+</html>

@@ -44,6 +44,10 @@ type Record struct {
 	WaitMS       float64 `json:"wait_ms,omitempty"`
 	DurationMS   float64 `json:"duration_ms"`
 	OutputTokens int64   `json:"output_tokens,omitempty"`
+	// InputTokens excludes cached input, which is counted in CacheReadTokens.
+	InputTokens      int64 `json:"input_tokens,omitempty"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 	// TokensPerSecond is output tokens divided by the time from the first
 	// token to the end of the stream.
 	TokensPerSecond float64 `json:"tokens_per_second,omitempty"`
@@ -55,7 +59,11 @@ func (record *Record) Fill(start, end time.Time, observer *Observer) {
 	if observer == nil {
 		return
 	}
-	record.OutputTokens = observer.OutputTokens()
+	usage := observer.Usage()
+	record.OutputTokens = usage.OutputTokens
+	record.InputTokens = usage.InputTokens
+	record.CacheReadTokens = usage.CacheReadTokens
+	record.CacheWriteTokens = usage.CacheWriteTokens
 	first := observer.FirstToken()
 	if first.IsZero() {
 		return
@@ -74,6 +82,25 @@ const minGeneration = 100 * time.Millisecond
 
 func milliseconds(duration time.Duration) float64 {
 	return float64(duration.Microseconds()) / 1000
+}
+
+// Sink receives records. Implementations must be safe for concurrent use.
+type Sink interface {
+	Write(Record) error
+}
+
+// Sinks writes each record to every sink, returning the first error.
+type Sinks []Sink
+
+// Write implements Sink.
+func (sinks Sinks) Write(record Record) error {
+	var first error
+	for _, sink := range sinks {
+		if err := sink.Write(record); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // Writer appends records to a JSONL file. It is safe for concurrent use.

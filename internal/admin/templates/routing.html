@@ -1,0 +1,24 @@
+{{template "head"}}
+<title>rute · {{.Provider}} routing</title>
+</head>
+<body>
+<header><b><a href="/">rute</a></b><span>{{.Provider}} routing</span></header>
+<form method="post" action="/providers/{{.Provider}}/routing" class="box">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="balance">balance</label>
+  <select id="balance" name="balance">
+    {{range .Balances}}<option value="{{.}}"{{if eq (print .) $.Balance}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <p class="muted">spread: least calls in flight. priority: in order, overflow past max in flight. failover: in order, move only when an account is unusable.</p>
+  <label for="order">account order</label>
+  <input id="order" name="order" value="{{.Order}}" placeholder="{{join .Accounts ", "}}">
+  <p class="muted">Comma-separated, most preferred first, for priority and failover. Accounts not listed follow. Leave empty for spread.</p>
+  <label for="max_in_flight">max in flight per account</label>
+  <input id="max_in_flight" name="max_in_flight" type="number" min="0" value="{{.MaxInFlight}}">
+  <p class="muted">0 means no limit. Priority needs a limit.</p>
+  <p class="muted">Applies now, until rute restarts. To keep it, set the -{{.Provider}}-balance, -{{.Provider}}-account-order, and -{{.Provider}}-max-in-flight flags.</p>
+  {{if .Error}}<p class="attention">{{.Error}}</p>{{end}}
+  <button>apply</button>
+</form>
+</body>
+</html>

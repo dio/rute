@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,11 +21,14 @@ import (
 	"time"
 
 	"github.com/dio/rute/internal/accountstore"
+	"github.com/dio/rute/internal/admin"
+	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/claudeauth"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
 	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/internal/modelcatalog"
+	"github.com/dio/rute/internal/pricing"
 	"github.com/dio/rute/internal/proxy"
 	"github.com/dio/rute/oauthpkce"
 	"github.com/dio/rute/providers/claude"
@@ -33,6 +37,8 @@ import (
 
 const (
 	defaultListenAddress = "127.0.0.1:20128"
+	defaultAdminAddress  = "127.0.0.1:20129"
+	defaultRetention     = 30 * 24 * time.Hour
 	defaultModel         = "gpt-5.6-sol"
 	defaultLoginTimeout  = 5 * time.Minute
 	shutdownTimeout      = 10 * time.Second
@@ -53,6 +59,10 @@ type options struct {
 	credentialFile string
 	modelsFile     string
 	metricsFile    string
+	metricsDB      string
+	prices         string
+	retention      time.Duration
+	adminListen    string
 	codexMaxCalls  int
 	claudeMaxCalls int
 	codexBalance   balanceOptions
@@ -76,15 +86,15 @@ func (balance balanceOptions) apply(pool *codexpool.Pool, provider string, limit
 			names = append(names, name)
 		}
 	}
-	if len(names) > 0 && mode == codexpool.BalanceSpread {
+	err = pool.SetRouting(mode, names, limit)
+	switch {
+	case errors.Is(err, codexpool.ErrOrderNeedsOrderedBalance):
 		return fmt.Errorf("-%s-account-order requires -%s-balance=priority or failover", provider, provider)
-	}
-	if mode == codexpool.BalancePriority && limit == 0 {
+	case errors.Is(err, codexpool.ErrPriorityNeedsLimit):
 		return fmt.Errorf("-%s-balance=priority requires -%s-max-in-flight; "+
 			"use failover to move only on rate limits", provider, provider)
 	}
-	pool.SetMaxInFlight(limit)
-	return pool.SetBalance(mode, names)
+	return err
 }
 
 type accountOptions struct {
@@ -270,13 +280,26 @@ func runServe(
 			return err
 		}
 	}
-	var metrics *latency.Writer
+	var sinks latency.Sinks
 	if opts.metricsFile != "" {
-		metrics, err = latency.OpenWriter(opts.metricsFile)
+		writer, err := latency.OpenWriter(opts.metricsFile)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = metrics.Close() }()
+		defer func() { _ = writer.Close() }()
+		sinks = append(sinks, writer)
+	}
+	calls, err := openCallStore(opts.metricsDB)
+	if err != nil {
+		return err
+	}
+	if calls != nil {
+		defer func() { _ = calls.Close() }()
+		sinks = append(sinks, calls)
+	}
+	var metrics latency.Sink
+	if len(sinks) > 0 {
+		metrics = sinks
 	}
 	handler, err := proxy.NewMulti(proxy.Config{
 		DefaultModel: opts.defaultModel,
@@ -293,13 +316,37 @@ func runServe(
 	}
 	defer listener.Close()
 
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    1 << 20,
-		ErrorLog:          log.New(stderr, "rute proxy: ", 0),
+	servers := []*http.Server{newHTTPServer(handler, stderr)}
+	listeners := []net.Listener{listener}
+	if opts.adminListen != "off" {
+		adminAddress, err := normalizeListenAddress(opts.adminListen)
+		if err != nil {
+			return fmt.Errorf("admin-listen: %w", err)
+		}
+		pools := map[string]*codexpool.Pool{accountstore.ProviderCodex: codexCredentials}
+		if claudeCredentials != nil {
+			pools[accountstore.ProviderClaude] = claudeCredentials
+		}
+		adminHandler, err := admin.New(admin.Config{
+			Version:      version,
+			Started:      time.Now(),
+			Pools:        pools,
+			Calls:        calls,
+			Prices:       pricing.NewFile(opts.prices),
+			LoginTimeout: opts.loginTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		adminListener, err := net.Listen("tcp", adminAddress)
+		if err != nil {
+			return fmt.Errorf("listen on %s: %w", adminAddress, err)
+		}
+		defer func() { _ = adminListener.Close() }()
+		servers = append(servers, newHTTPServer(adminHandler, stderr))
+		listeners = append(listeners, adminListener)
 	}
+
 	managerCtx, cancelManager := context.WithCancel(ctx)
 	var managerWait sync.WaitGroup
 	managerWait.Go(func() {
@@ -310,17 +357,29 @@ func runServe(
 			claudeCredentials.Run(managerCtx)
 		})
 	}
+	if calls != nil {
+		managerWait.Go(func() {
+			calls.Run(managerCtx, opts.retention, func(err error) {
+				_, _ = fmt.Fprintf(stderr, "rute proxy: call history: %v\n", err)
+			})
+		})
+	}
 	defer func() {
 		cancelManager()
 		managerWait.Wait()
 	}()
 
-	serveErrors := make(chan error, 1)
-	go func() {
-		serveErrors <- server.Serve(listener)
-	}()
+	serveErrors := make(chan error, len(servers))
+	for index, server := range servers {
+		go func() {
+			serveErrors <- server.Serve(listeners[index])
+		}()
+	}
 
 	fmt.Fprintf(stderr, "rute proxy listening on http://%s\n", listener.Addr())
+	if len(listeners) > 1 {
+		_, _ = fmt.Fprintf(stderr, "rute management on http://%s\n", listeners[1].Addr())
+	}
 	fmt.Fprintln(stderr, "downstream authentication is disabled; loopback access only")
 	if catalog.Path() != "" {
 		_, _ = fmt.Fprintf(stderr, "loaded model mappings from %s\n", catalog.Path())
@@ -328,25 +387,48 @@ func runServe(
 	if opts.metricsFile != "" {
 		_, _ = fmt.Fprintf(stderr, "writing call latency records to %s\n", opts.metricsFile)
 	}
+	if calls != nil {
+		_, _ = fmt.Fprintf(stderr, "keeping call history in %s\n", opts.metricsDB)
+	}
 
+	var firstErr error
 	select {
 	case serveErr := <-serveErrors:
-		if errors.Is(serveErr, http.ErrServerClosed) {
-			return nil
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			firstErr = serveErr
 		}
-		return serveErr
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shut down HTTP server: %w", err)
-		}
-		serveErr := <-serveErrors
-		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			return serveErr
-		}
-		return nil
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	for _, server := range servers {
+		if err := server.Shutdown(shutdownCtx); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("shut down HTTP server: %w", err)
+		}
+	}
+	return firstErr
+}
+
+func newHTTPServer(handler http.Handler, stderr io.Writer) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+		ErrorLog:          log.New(stderr, "rute proxy: ", 0),
+	}
+}
+
+// openCallStore opens the call history database, or returns nil when path is
+// "off".
+func openCallStore(path string) (*callstore.Store, error) {
+	if path == "off" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create call history directory: %w", err)
+	}
+	return callstore.Open(path)
 }
 
 func runAccount(
@@ -570,6 +652,30 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		"JSON model mapping file",
 	)
 	flags.StringVar(
+		&opts.adminListen,
+		"admin-listen",
+		defaultAdminAddress,
+		`loopback address for the management dashboard and API, or "off"`,
+	)
+	flags.StringVar(
+		&opts.metricsDB,
+		"metrics-db",
+		"",
+		`SQLite per-minute call counters for the dashboard (default: metrics.db in the state directory), or "off"`,
+	)
+	flags.StringVar(
+		&opts.prices,
+		"prices",
+		"",
+		"JSON price list for estimated usage costs (default: prices.json in the state directory)",
+	)
+	flags.DurationVar(
+		&opts.retention,
+		"metrics-retention",
+		defaultRetention,
+		"how long to keep per-minute call counters in -metrics-db",
+	)
+	flags.StringVar(
 		&opts.metricsFile,
 		"metrics-file",
 		"",
@@ -613,6 +719,21 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	addStorageFlags(flags, &opts.credentialKind, &opts.credentialFile)
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
+	}
+	if opts.retention <= 0 {
+		return options{}, errors.New("metrics-retention must be positive")
+	}
+	if opts.metricsDB == "" || opts.prices == "" {
+		dir, err := accountstore.DefaultStateDir()
+		if err != nil {
+			return options{}, err
+		}
+		if opts.metricsDB == "" {
+			opts.metricsDB = filepath.Join(dir, "metrics.db")
+		}
+		if opts.prices == "" {
+			opts.prices = filepath.Join(dir, "prices.json")
+		}
 	}
 	if opts.codexMaxCalls < 0 || opts.claudeMaxCalls < 0 {
 		return options{}, errors.New("max-in-flight limits must not be negative")

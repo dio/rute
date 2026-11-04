@@ -245,7 +245,7 @@ func TestPoolSessionStickyRoundRobinAndCooldown(t *testing.T) {
 		t.Errorf("second session lease = %q, want %q", secondLease.AccountID, second.ID)
 	}
 
-	pool.MarkRateLimited(first.ID, time.Now().Add(time.Minute))
+	pool.MarkRateLimited(first.ID, time.Now().Add(time.Minute), "")
 	failoverLease, err := pool.Acquire(context.Background(), "session-a", nil)
 	if err != nil {
 		t.Fatalf("acquire after cooldown: %v", err)
@@ -545,7 +545,7 @@ func TestPoolPriorityAndFailoverBalance(t *testing.T) {
 				t.Fatalf("session %s went to %s while team was usable", session, team.AccountName)
 			}
 		}
-		pool.MarkRateLimited(team.AccountID, time.Now().Add(time.Hour))
+		pool.MarkRateLimited(team.AccountID, time.Now().Add(time.Hour), "seven_day")
 		moved := acquire(t, pool, "a")
 		if moved.AccountName != "personal" {
 			t.Errorf("rate-limited team did not fail over: %s", moved.AccountName)

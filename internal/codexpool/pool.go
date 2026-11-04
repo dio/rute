@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type account struct {
 	dirty               bool
 	cooldownUntil       time.Time
 	cooldownRateLimited bool
+	cooldownReason      string
 	inFlight            int
 }
 
@@ -494,19 +496,61 @@ func (pool *Pool) SetBalance(mode Balance, names []string) error {
 	}
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	order := make(map[string]int, len(names))
-	for index, name := range names {
-		if pool.accountByNameLocked(name) == nil {
-			return fmt.Errorf("codexpool: %s account %q in account order does not exist", pool.provider, name)
-		}
-		if _, duplicate := order[name]; duplicate {
-			return fmt.Errorf("codexpool: account %q appears twice in account order", name)
-		}
-		order[name] = index
+	order, err := pool.orderLocked(names)
+	if err != nil {
+		return err
 	}
 	pool.balance = mode
 	pool.order = order
 	return nil
+}
+
+// Routing errors returned by SetRouting.
+var (
+	ErrOrderNeedsOrderedBalance = errors.New("an account order requires the priority or failover balance")
+	ErrPriorityNeedsLimit       = errors.New("the priority balance requires a max in flight; " +
+		"use failover to move only on rate limits")
+)
+
+// SetRouting validates and applies a balance mode, account order, and
+// per-account in-flight limit together. On error nothing changes.
+func (pool *Pool) SetRouting(mode Balance, names []string, limit int) error {
+	if _, err := ParseBalance(string(mode)); err != nil {
+		return err
+	}
+	if len(names) > 0 && mode == BalanceSpread {
+		return ErrOrderNeedsOrderedBalance
+	}
+	if limit < 0 {
+		return errors.New("max in flight must not be negative")
+	}
+	if mode == BalancePriority && limit == 0 {
+		return ErrPriorityNeedsLimit
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	order, err := pool.orderLocked(names)
+	if err != nil {
+		return err
+	}
+	pool.balance = mode
+	pool.order = order
+	pool.maxInFlight = limit
+	return nil
+}
+
+func (pool *Pool) orderLocked(names []string) (map[string]int, error) {
+	order := make(map[string]int, len(names))
+	for index, name := range names {
+		if pool.accountByNameLocked(name) == nil {
+			return nil, fmt.Errorf("codexpool: %s account %q in account order does not exist", pool.provider, name)
+		}
+		if _, duplicate := order[name]; duplicate {
+			return nil, fmt.Errorf("codexpool: account %q appears twice in account order", name)
+		}
+		order[name] = index
+	}
+	return order, nil
 }
 
 // rankLocked returns the priority of the account at index; lower is earlier.
@@ -515,6 +559,77 @@ func (pool *Pool) rankLocked(item *account, index int) int {
 		return rank
 	}
 	return len(pool.order) + index
+}
+
+// AccountStatus describes one account for status views. It contains no
+// credentials.
+type AccountStatus struct {
+	Name          string             `json:"name"`
+	State         accountstore.State `json:"state"`
+	InFlight      int                `json:"in_flight"`
+	CooldownUntil *time.Time         `json:"cooldown_until,omitempty"`
+	RateLimited   bool               `json:"rate_limited,omitempty"`
+	Reason        string             `json:"reason,omitempty"`
+}
+
+// Status describes a provider's pool for status views.
+type Status struct {
+	Provider    string          `json:"provider"`
+	Balance     Balance         `json:"balance"`
+	Order       []string        `json:"order,omitempty"`
+	MaxInFlight int             `json:"max_in_flight"`
+	Accounts    []AccountStatus `json:"accounts"`
+}
+
+// Status returns a snapshot of the pool. Accounts are listed in preference
+// order for the priority and failover modes, and in store order otherwise.
+func (pool *Pool) Status() Status {
+	now := time.Now()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	status := Status{
+		Provider:    pool.provider,
+		Balance:     pool.balance,
+		MaxInFlight: pool.maxInFlight,
+		Accounts:    make([]AccountStatus, 0, len(pool.accounts)),
+	}
+	if status.Balance == "" {
+		status.Balance = BalanceSpread
+	}
+	type ranked struct {
+		rank   int
+		status AccountStatus
+	}
+	items := make([]ranked, 0, len(pool.accounts))
+	for index, item := range pool.accounts {
+		account := AccountStatus{
+			Name:     item.record.Name,
+			State:    item.record.State,
+			InFlight: item.inFlight,
+		}
+		if item.source == nil {
+			account.State = accountstore.StateReauthRequired
+		}
+		if now.Before(item.cooldownUntil) {
+			until := item.cooldownUntil.UTC()
+			account.CooldownUntil = &until
+			account.RateLimited = item.cooldownRateLimited
+			account.Reason = item.cooldownReason
+		}
+		rank := index
+		if status.Balance != BalanceSpread {
+			rank = pool.rankLocked(item, index)
+		}
+		items = append(items, ranked{rank: rank, status: account})
+	}
+	slices.SortStableFunc(items, func(left, right ranked) int { return left.rank - right.rank })
+	for _, item := range items {
+		status.Accounts = append(status.Accounts, item.status)
+		if status.Balance != BalanceSpread {
+			status.Order = append(status.Order, item.status.Name)
+		}
+	}
+	return status
 }
 
 // InFlight returns the leased calls for each account name.
@@ -561,9 +676,15 @@ func (pool *Pool) ForceRefresh(ctx context.Context, id string) (Lease, error) {
 	return lease, nil
 }
 
-// MarkRateLimited cools down an account and unbinds its sessions.
-func (pool *Pool) MarkRateLimited(id string, until time.Time) {
+// MarkRateLimited cools down an account and unbinds its sessions. reason is a
+// short upstream label, such as the exhausted quota window, for status views.
+func (pool *Pool) MarkRateLimited(id string, until time.Time, reason string) {
 	pool.setCooldownReason(id, until, true)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if item := pool.accountByIDLocked(id); item != nil && item.cooldownRateLimited {
+		item.cooldownReason = reason
+	}
 }
 
 // MarkAuthorizationFailure applies a short cooldown after a refreshed token is
@@ -742,6 +863,7 @@ func (pool *Pool) setCooldownReason(id string, until time.Time, rateLimited bool
 	if until.After(item.cooldownUntil) {
 		item.cooldownUntil = until
 		item.cooldownRateLimited = rateLimited
+		item.cooldownReason = ""
 	}
 	pool.unbindAccountLocked(id)
 }
