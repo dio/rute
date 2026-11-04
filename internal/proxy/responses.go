@@ -80,7 +80,7 @@ func (handler *Handler) handleResponses(writer http.ResponseWriter, request *htt
 		return
 	}
 
-	response, err := handler.upstream(request.Context(), normalized, sessionID)
+	response, err := handler.upstream(request.Context(), "responses", normalized, sessionID)
 	if err != nil {
 		writeProxyError(writer, err)
 		return

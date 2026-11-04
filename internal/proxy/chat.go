@@ -94,7 +94,7 @@ func (handler *Handler) handleChatCompletions(writer http.ResponseWriter, reques
 		return
 	}
 
-	response, err := handler.upstream(request.Context(), responsesBody, sessionID)
+	response, err := handler.upstream(request.Context(), "chat_completions", responsesBody, sessionID)
 	if err != nil {
 		writeProxyError(writer, err)
 		return

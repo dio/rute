@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/internal/modelcatalog"
 	"github.com/dio/rute/providers/claude"
 	"github.com/dio/rute/providers/codex"
@@ -38,6 +41,7 @@ type credentialSource interface {
 	ForceRefresh(ctx context.Context, accountID string) (codexpool.Lease, error)
 	MarkRateLimited(accountID string, until time.Time)
 	MarkAuthorizationFailure(accountID string)
+	Release(accountID string)
 }
 
 // Config configures an OpenAI-compatible proxy handler.
@@ -48,6 +52,12 @@ type Config struct {
 	HTTPClient        *http.Client
 	MaxRequestSize    int64
 	ModelCatalog      *modelcatalog.Catalog
+	// Metrics, when set, receives one latency record per inference call.
+	Metrics *latency.Writer
+	// Log, when set, receives one line per upstream rate-limit response with
+	// the account name, upstream error type and message, and rate-limit
+	// headers. It never receives credentials or request content.
+	Log *log.Logger
 }
 
 // Handler routes compatible requests to Codex and Claude upstreams.
@@ -178,8 +188,27 @@ func (handler *Handler) handleModels(writer http.ResponseWriter, request *http.R
 	})
 }
 
+// upstream sends body to Codex. The returned body releases the account lease
+// when closed.
 func (handler *Handler) upstream(
 	ctx context.Context,
+	endpoint string,
+	body map[string]any,
+	sessionID string,
+) (*http.Response, error) {
+	model, _ := body["model"].(string)
+	call := handler.newCall(ctx, accountstore.ProviderCodex, endpoint, model)
+	response, err := handler.codexAttempts(ctx, call, body, sessionID)
+	if err != nil {
+		call.fail(err)
+		return nil, err
+	}
+	return call.wrap(response), nil
+}
+
+func (handler *Handler) codexAttempts(
+	ctx context.Context,
+	call *upstreamCall,
 	body map[string]any,
 	sessionID string,
 ) (*http.Response, error) {
@@ -187,16 +216,14 @@ func (handler *Handler) upstream(
 	if err != nil {
 		return nil, fmt.Errorf("proxy: encode upstream request: %w", err)
 	}
+	credentials := handler.credentials[accountstore.ProviderCodex]
 	excluded := make(map[string]struct{})
 	for {
-		lease, err := handler.credentials[accountstore.ProviderCodex].Acquire(
-			ctx,
-			sessionID,
-			excluded,
-		)
+		lease, err := credentials.Acquire(ctx, sessionID, excluded)
 		if err != nil {
 			return nil, err
 		}
+		call.acquired(lease)
 		response, err := handler.doUpstream(ctx, payload, sessionID, lease.Token)
 		if err != nil {
 			return nil, err
@@ -207,12 +234,10 @@ func (handler *Handler) upstream(
 		}
 		if authorizationStatus(response.StatusCode) {
 			discardResponse(response)
-			refreshed, refreshErr := handler.credentials[accountstore.ProviderCodex].ForceRefresh(
-				ctx,
-				lease.AccountID,
-			)
+			refreshed, refreshErr := credentials.ForceRefresh(ctx, lease.AccountID)
 			if refreshErr != nil {
 				excluded[lease.AccountID] = struct{}{}
+				call.retry()
 				continue
 			}
 			response, err = handler.doUpstream(ctx, payload, sessionID, refreshed.Token)
@@ -221,8 +246,9 @@ func (handler *Handler) upstream(
 			}
 			if authorizationStatus(response.StatusCode) {
 				discardResponse(response)
-				handler.credentials[accountstore.ProviderCodex].MarkAuthorizationFailure(lease.AccountID)
+				credentials.MarkAuthorizationFailure(lease.AccountID)
 				excluded[lease.AccountID] = struct{}{}
+				call.retry()
 				continue
 			}
 			if response.StatusCode != http.StatusTooManyRequests {
@@ -230,10 +256,60 @@ func (handler *Handler) upstream(
 			}
 		}
 		until := rateLimitUntil(response)
+		handler.logRateLimit(accountstore.ProviderCodex, lease.AccountName, response, until)
 		discardResponse(response)
-		handler.credentials[accountstore.ProviderCodex].MarkRateLimited(lease.AccountID, until)
+		credentials.MarkRateLimited(lease.AccountID, until)
 		excluded[lease.AccountID] = struct{}{}
+		call.retry()
 	}
+}
+
+const maxLoggedMessage = 300
+
+// logRateLimit reports why the upstream refused a call. rateLimitUntil has
+// already buffered the body, so it can be read again here.
+func (handler *Handler) logRateLimit(
+	provider string,
+	account string,
+	response *http.Response,
+	until time.Time,
+) {
+	if handler.config.Log == nil {
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes))
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	var envelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &envelope)
+	message := envelope.Error.Message
+	if len(message) > maxLoggedMessage {
+		message = message[:maxLoggedMessage] + "..."
+	}
+	var limits []string
+	for key, values := range response.Header {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "ratelimit") || lower == "retry-after" {
+			limits = append(limits, lower+"="+strings.Join(values, ","))
+		}
+	}
+	slices.Sort(limits)
+	handler.config.Log.Printf(
+		"%s account %q rate-limited until %s: status=%d type=%q code=%q message=%q %s",
+		provider,
+		account,
+		until.UTC().Format(time.RFC3339),
+		response.StatusCode,
+		envelope.Error.Type,
+		envelope.Error.Code,
+		message,
+		strings.Join(limits, " "),
+	)
 }
 
 func authorizationStatus(status int) bool {
@@ -424,6 +500,16 @@ func writeAPIError(writer http.ResponseWriter, status int, message, errorType, c
 }
 
 func writeProxyError(writer http.ResponseWriter, err error) {
+	if setRateLimitRetryAfter(writer, err) {
+		writeAPIError(
+			writer,
+			http.StatusTooManyRequests,
+			"All Codex accounts are rate-limited; retry after the indicated cooldown",
+			"rate_limit_error",
+			"rate_limit_exceeded",
+		)
+		return
+	}
 	switch {
 	case errors.Is(err, codexpool.ErrAuthenticationRequired),
 		errors.Is(err, codexauth.ErrReauthenticationRequired):

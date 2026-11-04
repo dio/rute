@@ -120,7 +120,7 @@ func (handler *Handler) handleResponsesWebSocket(
 			continue
 		}
 
-		response, upstreamErr := handler.upstream(ctx, normalized, sessionID)
+		response, upstreamErr := handler.upstream(ctx, "responses_ws", normalized, sessionID)
 		if upstreamErr != nil {
 			errorType, message := webSocketProxyError(upstreamErr)
 			if !handler.writeWebSocketError(
@@ -146,6 +146,11 @@ func webSocketProxyError(err error) (string, string) {
 		errors.Is(err, codexauth.ErrReauthenticationRequired) {
 		return "authentication_required",
 			"Codex authentication is required; run 'rute account reauth NAME'"
+	}
+	var unavailable *codexpool.UnavailableError
+	if errors.As(err, &unavailable) && unavailable.RateLimited {
+		return "rate_limit_error",
+			"All Codex accounts are rate-limited; retry after the cooldown"
 	}
 	if errors.Is(err, codexpool.ErrAccountsUnavailable) {
 		return "upstream_accounts_unavailable",

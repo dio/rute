@@ -69,6 +69,8 @@ func (handler *Handler) handleClaudeMessages(
 	}
 	response, err := handler.claudeUpstream(
 		request.Context(),
+		"messages",
+		resolution.UpstreamModel,
 		payload,
 		request.Header,
 		requestSessionID(request),
@@ -89,22 +91,43 @@ func (handler *Handler) handleClaudeMessages(
 	_, _ = io.Copy(writer, response.Body)
 }
 
+// claudeUpstream sends payload to Claude. The returned body releases the
+// account lease when closed.
 func (handler *Handler) claudeUpstream(
 	ctx context.Context,
+	endpoint string,
+	model string,
+	payload []byte,
+	downstreamHeaders http.Header,
+	sessionID string,
+) (*http.Response, error) {
+	if handler.credentials[accountstore.ProviderClaude] == nil {
+		return nil, codexpool.ErrAuthenticationRequired
+	}
+	call := handler.newCall(ctx, accountstore.ProviderClaude, endpoint, model)
+	response, err := handler.claudeAttempts(ctx, call, payload, downstreamHeaders, sessionID)
+	if err != nil {
+		call.fail(err)
+		return nil, err
+	}
+	return call.wrap(response), nil
+}
+
+func (handler *Handler) claudeAttempts(
+	ctx context.Context,
+	call *upstreamCall,
 	payload []byte,
 	downstreamHeaders http.Header,
 	sessionID string,
 ) (*http.Response, error) {
 	credentials := handler.credentials[accountstore.ProviderClaude]
-	if credentials == nil {
-		return nil, codexpool.ErrAuthenticationRequired
-	}
 	excluded := make(map[string]struct{})
 	for {
 		lease, err := credentials.Acquire(ctx, sessionID, excluded)
 		if err != nil {
 			return nil, err
 		}
+		call.acquired(lease)
 		response, err := handler.doClaudeUpstream(
 			ctx,
 			payload,
@@ -115,7 +138,7 @@ func (handler *Handler) claudeUpstream(
 			return nil, err
 		}
 		if !authorizationStatus(response.StatusCode) &&
-			response.StatusCode != http.StatusTooManyRequests {
+			!accountRateLimited(response) {
 			return response, nil
 		}
 		if authorizationStatus(response.StatusCode) {
@@ -123,6 +146,7 @@ func (handler *Handler) claudeUpstream(
 			refreshed, refreshErr := credentials.ForceRefresh(ctx, lease.AccountID)
 			if refreshErr != nil {
 				excluded[lease.AccountID] = struct{}{}
+				call.retry()
 				continue
 			}
 			response, err = handler.doClaudeUpstream(
@@ -138,16 +162,19 @@ func (handler *Handler) claudeUpstream(
 				discardResponse(response)
 				credentials.MarkAuthorizationFailure(lease.AccountID)
 				excluded[lease.AccountID] = struct{}{}
+				call.retry()
 				continue
 			}
-			if response.StatusCode != http.StatusTooManyRequests {
+			if !accountRateLimited(response) {
 				return response, nil
 			}
 		}
 		until := rateLimitUntil(response)
+		handler.logRateLimit(accountstore.ProviderClaude, lease.AccountName, response, until)
 		discardResponse(response)
 		credentials.MarkRateLimited(lease.AccountID, until)
 		excluded[lease.AccountID] = struct{}{}
+		call.retry()
 	}
 }
 
@@ -195,6 +222,23 @@ func (handler *Handler) doClaudeUpstream(
 		return nil, err
 	}
 	return response, nil
+}
+
+// accountRateLimited reports whether a Claude response is an account quota
+// rejection. Claude sends Retry-After or anthropic-ratelimit-* headers with
+// those. A 429 with neither rejects the request itself, so it is returned to
+// the client without cooling down the account or trying another one.
+func accountRateLimited(response *http.Response) bool {
+	if response.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	for key := range response.Header {
+		lower := strings.ToLower(key)
+		if lower == "retry-after" || strings.HasPrefix(lower, "anthropic-ratelimit-") {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeHeaderToken(value, required string) string {
