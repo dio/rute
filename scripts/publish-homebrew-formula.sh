@@ -46,6 +46,11 @@ umask 022
 GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 export GIT_SSH_COMMAND
 brew tap "$tap_name" "$tap_clone_repository"
+# Current Homebrew refuses to load formulae from a tap it has not been told to
+# trust. Older versions have no brew trust command and need nothing.
+if brew help trust >/dev/null 2>&1; then
+	brew trust --tap "$tap_name"
+fi
 tap_dir=$(brew --repository "$tap_name")
 git -C "$tap_dir" remote set-url origin "$tap_repository"
 git -C "$tap_dir" pull --ff-only origin main
