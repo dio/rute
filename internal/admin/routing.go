@@ -3,12 +3,14 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/routingfile"
 )
 
 // RoutingRequest is the body of PUT /v1/providers/{provider}/routing.
@@ -18,7 +20,8 @@ type RoutingRequest struct {
 	MaxInFlight int      `json:"max_in_flight"`
 }
 
-// applyRouting changes a provider's routing until rute restarts.
+// applyRouting changes a provider's routing and saves it when a routing file
+// is configured.
 func (server *Server) applyRouting(provider string, routing RoutingRequest) (codexpool.Status, error) {
 	pool := server.config.Pools[provider]
 	if pool == nil {
@@ -37,10 +40,20 @@ func (server *Server) applyRouting(provider string, routing RoutingRequest) (cod
 	if err := pool.SetRouting(mode, order, routing.MaxInFlight); err != nil {
 		return codexpool.Status{}, err
 	}
+	if server.config.Routing != nil {
+		if err := server.config.Routing.Save(provider, routingfile.Routing{
+			Balance: string(mode), Order: order, MaxInFlight: routing.MaxInFlight,
+		}); err != nil {
+			return pool.Status(), fmt.Errorf("%w: %w", errNotSaved, err)
+		}
+	}
 	return pool.Status(), nil
 }
 
-var errUnknownProvider = errors.New("unknown provider")
+var (
+	errUnknownProvider = errors.New("unknown provider")
+	errNotSaved        = errors.New("routing applied but not saved")
+)
 
 func (server *Server) handleRoutingAPI(writer http.ResponseWriter, request *http.Request) {
 	mediaType, _, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -60,6 +73,10 @@ func (server *Server) handleRoutingAPI(writer http.ResponseWriter, request *http
 		writeError(writer, http.StatusNotFound, err.Error())
 		return
 	}
+	if errors.Is(err, errNotSaved) {
+		writeError(writer, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
@@ -75,6 +92,7 @@ type routingView struct {
 	Order       string
 	MaxInFlight int
 	Accounts    []string
+	SavedTo     string
 	Error       string
 }
 
@@ -91,6 +109,9 @@ func (server *Server) routingPage(provider string) (routingView, bool) {
 		Balances:    []codexpool.Balance{codexpool.BalanceSpread, codexpool.BalancePriority, codexpool.BalanceFailover},
 		Order:       strings.Join(status.Order, ", "),
 		MaxInFlight: status.MaxInFlight,
+	}
+	if server.config.Routing != nil {
+		view.SavedTo = server.config.Routing.Path()
 	}
 	for _, account := range status.Accounts {
 		view.Accounts = append(view.Accounts, account.Name)

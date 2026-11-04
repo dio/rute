@@ -16,7 +16,7 @@
   <label for="max_in_flight">max in flight per account</label>
   <input id="max_in_flight" name="max_in_flight" type="number" min="0" value="{{.MaxInFlight}}">
   <p class="muted">0 means no limit. Priority needs a limit.</p>
-  <p class="muted">Applies now, until rute restarts. To keep it, set the -{{.Provider}}-balance, -{{.Provider}}-account-order, and -{{.Provider}}-max-in-flight flags.</p>
+  <p class="muted">Applies to new calls now.{{if .SavedTo}} Saved to {{.SavedTo}} for the next start; the -{{.Provider}}-balance, -{{.Provider}}-account-order, and -{{.Provider}}-max-in-flight flags override it.{{else}} Lasts until rute restarts.{{end}}</p>
   {{if .Error}}<p class="attention">{{.Error}}</p>{{end}}
   <button>apply</button>
 </form>
