@@ -2,6 +2,7 @@ package callstore
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,14 +11,13 @@ import (
 	"github.com/dio/rute/internal/latency"
 )
 
-func TestStoreWritesQueriesAndPrunes(t *testing.T) {
+func TestStoreAggregatesFlushesAndPrunes(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metrics.db")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer func() { _ = store.Close() }()
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -26,43 +26,89 @@ func TestStoreWritesQueriesAndPrunes(t *testing.T) {
 		t.Errorf("database mode = %o, want 600", mode)
 	}
 
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	records := []latency.Record{
-		{Time: now.Add(-48 * time.Hour), Source: "proxy", Provider: "claude", Endpoint: "messages",
-			Account: "default", InFlight: 1, Outcome: latency.OutcomeRateLimited, Status: 429, DurationMS: 300},
-		{Time: now.Add(-time.Hour), Source: "proxy", Provider: "claude", Endpoint: "messages",
-			Model: "claude-sonnet-5-5", Account: "personal", InFlight: 2, Attempts: 2, Status: 200,
-			Outcome: latency.OutcomeOK, WaitMS: 1200.5, DurationMS: 4000, OutputTokens: 300, TokensPerSecond: 107.2},
-		{Time: now, Source: "proxy", Provider: "codex", Endpoint: "responses_ws",
-			Account: "codex-a", InFlight: 1, Outcome: latency.OutcomeCanceled, DurationMS: 60000},
+	now := time.Now().UTC()
+	old := latency.Record{Time: now.Add(-48 * time.Hour), Provider: "claude", Account: "default",
+		InFlight: 1, Outcome: latency.OutcomeRateLimited, DurationMS: 300}
+	calls := []latency.Record{
+		old,
+		{Time: now, Provider: "claude", Account: "personal", InFlight: 2, Attempts: 2,
+			Outcome: latency.OutcomeOK, WaitMS: 1500, DurationMS: 4000, OutputTokens: 300, TokensPerSecond: 70},
+		{Time: now, Provider: "claude", Account: "personal", InFlight: 3,
+			Outcome: latency.OutcomeOK, WaitMS: 3000, DurationMS: 6000, OutputTokens: 500, TokensPerSecond: 90},
+		{Time: now, Provider: "claude", Account: "personal", InFlight: 30,
+			Outcome: latency.OutcomeTimeout, DurationMS: 120000},
 	}
-	for _, record := range records {
+	for _, record := range calls {
 		if err := store.Write(record); err != nil {
-			t.Fatalf("write: %v", err)
+			t.Fatal(err)
 		}
 	}
-
 	ctx := context.Background()
-	since, err := store.Since(ctx, now.Add(-2*time.Hour))
+
+	// Counters are visible before they are flushed.
+	summary, err := store.Summary(ctx, now.Add(-time.Hour))
 	if err != nil {
-		t.Fatalf("since: %v", err)
+		t.Fatal(err)
 	}
-	if len(since) != 2 || since[0] != records[1] || since[1] != records[2] {
-		t.Fatalf("since = %+v", since)
+	check := func(summary []*Counters) {
+		t.Helper()
+		if len(summary) != 2 {
+			t.Fatalf("summary rows = %d, want 2", len(summary))
+		}
+		low, high := summary[0], summary[1]
+		if low.InFlight != "2-3" || low.Calls != 2 || low.OK != 2 || low.Failovers != 1 ||
+			low.OutputTokens != 800 || low.DurationMS != 10000 {
+			t.Errorf("2-3 row = %+v", low)
+		}
+		row := low.Row()
+		if row.WaitP50 < 1000 || row.WaitP50 > 2000 || row.WaitP90 < 2000 || row.WaitP90 > 4000 {
+			t.Errorf("wait percentiles = %v, %v", row.WaitP50, row.WaitP90)
+		}
+		if row.MeanDuration != 5000 || row.TokensPerSec < 60 || row.TokensPerSec > 80 {
+			t.Errorf("row = %+v", row)
+		}
+		if high.InFlight != "25-48" || high.Canceled != 1 || !math.IsNaN(high.Row().WaitP50) {
+			t.Errorf("25-48 row = %+v", high)
+		}
 	}
-	recent, err := store.Recent(ctx, 2)
+	check(summary)
+
+	if err := store.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	// A second flush of the same minute adds to the stored row.
+	if err := store.Write(calls[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	summary, err = store.Summary(ctx, now.Add(-time.Hour))
 	if err != nil {
-		t.Fatalf("recent: %v", err)
+		t.Fatal(err)
 	}
-	if len(recent) != 2 || recent[0].Account != "codex-a" || recent[1].Account != "personal" {
-		t.Fatalf("recent = %+v", recent)
+	if summary[0].Calls != 3 || summary[0].Failovers != 2 {
+		t.Errorf("after second flush = %+v", summary[0])
 	}
+
 	pruned, err := store.Prune(ctx, now.Add(-24*time.Hour))
 	if err != nil || pruned != 1 {
 		t.Fatalf("prune = %d, %v", pruned, err)
 	}
+	oldest, err := store.Oldest(ctx)
+	if err != nil || oldest.Before(now.Add(-time.Hour)) {
+		t.Fatalf("oldest = %v, %v", oldest, err)
+	}
 
-	// History survives reopening.
+	recent := store.Recent(2)
+	if len(recent) != 2 || recent[0].InFlight != 2 || recent[1].InFlight != 30 {
+		t.Errorf("recent = %+v", recent)
+	}
+
+	// Counters survive reopening; individual calls do not.
+	if err := store.Write(calls[2]); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +117,57 @@ func TestStoreWritesQueriesAndPrunes(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = reopened.Close() }()
-	all, err := reopened.Since(ctx, time.Time{})
-	if err != nil || len(all) != 2 {
-		t.Fatalf("after reopen = %d records, %v", len(all), err)
+	summary, err = reopened.Summary(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary[0].Calls != 4 {
+		t.Errorf("after reopen = %+v", summary[0])
+	}
+	if got := reopened.Recent(10); len(got) != 0 {
+		t.Errorf("recent calls persisted: %+v", got)
+	}
+}
+
+func TestRecentWrapsAround(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	for index := range recentSize + 5 {
+		_ = store.Write(latency.Record{Time: time.Now(), Provider: "codex", InFlight: index, Outcome: latency.OutcomeOK})
+	}
+	recent := store.Recent(recentSize + 10)
+	if len(recent) != recentSize || recent[0].InFlight != recentSize+4 || recent[recentSize-1].InFlight != 5 {
+		t.Errorf("recent = %d items, first %d, last %d", len(recent), recent[0].InFlight, recent[len(recent)-1].InFlight)
+	}
+}
+
+func TestHistogramQuantile(t *testing.T) {
+	t.Parallel()
+	single := newHistogram(waitBounds)
+	single.observe(waitBounds, 2100)
+	if got := single.Quantile(waitBounds, 0.5); got != 2100 {
+		t.Errorf("single value p50 = %v, want 2100", got)
+	}
+
+	spread := newHistogram(waitBounds)
+	for value := 1.0; value <= 10000; value++ {
+		spread.observe(waitBounds, value)
+	}
+	for q, want := range map[float64]float64{0.5: 5000, 0.9: 9000} {
+		if got := spread.Quantile(waitBounds, q); math.Abs(got-want)/want > 0.25 {
+			t.Errorf("p%v = %v, want within 25%% of %v", q*100, got, want)
+		}
+	}
+
+	decoded := decodeHistogram(spread.encode(), waitBounds)
+	if decoded.Min != 1 || decoded.Max != 10000 || decoded.total() != 10000 {
+		t.Errorf("decoded = min %v, max %v, total %d", decoded.Min, decoded.Max, decoded.total())
+	}
+	if !math.IsNaN(newHistogram(waitBounds).Quantile(waitBounds, 0.5)) {
+		t.Error("empty histogram quantile is not NaN")
 	}
 }

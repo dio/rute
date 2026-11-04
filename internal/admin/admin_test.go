@@ -271,6 +271,19 @@ func TestDashboardShowsAccountsAndHistory(t *testing.T) {
 	if strings.Contains(body, "secret-") {
 		t.Error("dashboard leaks credentials")
 	}
+	if !strings.Contains(body, `<meta http-equiv="refresh" content="5">`) {
+		t.Error("dashboard does not refresh every 5 seconds by default")
+	}
+	for query, want := range map[string]string{"refresh=1m": `content="60"`, "refresh=off": ""} {
+		page := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/?"+query, nil)).Body.String()
+		hasRefresh := strings.Contains(page, `http-equiv="refresh"`)
+		if want == "" && hasRefresh || want != "" && !strings.Contains(page, want) {
+			t.Errorf("%s: refresh tag present = %v", query, hasRefresh)
+		}
+		if !strings.Contains(page, query+`" class="on"`) {
+			t.Errorf("%s: current refresh choice is not marked", query)
+		}
+	}
 
 	summary := fixture.do(t, httptest.NewRequest(http.MethodGet,
 		"http://127.0.0.1:20129/v1/calls/summary?window=15m", nil))
@@ -282,5 +295,86 @@ func TestDashboardShowsAccountsAndHistory(t *testing.T) {
 	}
 	if len(response.Rows) != 2 || response.Rows[0].WaitP50MS != nil || *response.Rows[1].WaitP50MS != 2100 {
 		t.Errorf("summary rows = %+v", response.Rows)
+	}
+}
+
+func TestRoutingAPIChangesRunningPool(t *testing.T) {
+	t.Parallel()
+	fixture := newFixture(t)
+	put := func(contentType, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:20129/v1/providers/claude/routing",
+			strings.NewReader(body))
+		request.Header.Set("Content-Type", contentType)
+		return fixture.do(t, request)
+	}
+	if got := put("text/plain", `{"balance":"spread"}`).Code; got != http.StatusUnsupportedMediaType {
+		t.Errorf("non-JSON body = %d, want 415", got)
+	}
+	for _, body := range []string{
+		`{"balance":"spread","order":["personal"]}`,
+		`{"balance":"priority","max_in_flight":0}`,
+		`{"balance":"failover","order":["missing"]}`,
+		`{"balance":"sideways"}`,
+	} {
+		if got := put("application/json", body).Code; got != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400", body, got)
+		}
+	}
+	if status := fixture.pool.Status(); status.Balance != codexpool.BalancePriority || status.MaxInFlight != 6 {
+		t.Fatalf("rejected change altered the pool: %+v", status)
+	}
+
+	recorder := put("application/json", `{"balance":"failover","order":["personal","default"],"max_in_flight":3}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("valid change = %d: %s", recorder.Code, recorder.Body)
+	}
+	status := fixture.pool.Status()
+	if status.Balance != codexpool.BalanceFailover || status.MaxInFlight != 3 ||
+		strings.Join(status.Order, ",") != "personal,default" {
+		t.Errorf("status after change = %+v", status)
+	}
+
+	request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:20129/v1/providers/gemini/routing",
+		strings.NewReader(`{"balance":"spread"}`))
+	request.Header.Set("Content-Type", "application/json")
+	if got := fixture.do(t, request).Code; got != http.StatusNotFound {
+		t.Errorf("unknown provider = %d, want 404", got)
+	}
+}
+
+func TestRoutingFormChangesRunningPool(t *testing.T) {
+	t.Parallel()
+	fixture := newFixture(t)
+	page := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/providers/claude/routing", nil))
+	body := page.Body.String()
+	if !strings.Contains(body, `<option value="priority" selected>`) || !strings.Contains(body, `value="default, personal"`) {
+		t.Fatalf("routing page does not show current routing:\n%s", body)
+	}
+	match := regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`).FindStringSubmatch(body)
+	if match == nil {
+		t.Fatal("no CSRF token in routing form")
+	}
+	post := func(values url.Values) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:20129/providers/claude/routing",
+			strings.NewReader(values.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return fixture.do(t, request)
+	}
+	values := url.Values{"balance": {"spread"}, "order": {""}, "max_in_flight": {"0"}}
+	if got := post(values).Code; got != http.StatusForbidden {
+		t.Errorf("form without token = %d, want 403", got)
+	}
+	values.Set("csrf", match[1])
+	values.Set("order", "personal")
+	if recorder := post(values); recorder.Code != http.StatusBadRequest ||
+		!strings.Contains(recorder.Body.String(), "requires the priority or failover") {
+		t.Errorf("invalid form = %d:\n%s", recorder.Code, recorder.Body)
+	}
+	values.Set("order", "")
+	if recorder := post(values); recorder.Code != http.StatusSeeOther {
+		t.Fatalf("valid form = %d:\n%s", recorder.Code, recorder.Body)
+	}
+	if status := fixture.pool.Status(); status.Balance != codexpool.BalanceSpread || status.MaxInFlight != 0 || len(status.Order) != 0 {
+		t.Errorf("status after form = %+v", status)
 	}
 }

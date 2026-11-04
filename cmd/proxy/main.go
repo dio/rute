@@ -84,15 +84,15 @@ func (balance balanceOptions) apply(pool *codexpool.Pool, provider string, limit
 			names = append(names, name)
 		}
 	}
-	if len(names) > 0 && mode == codexpool.BalanceSpread {
+	err = pool.SetRouting(mode, names, limit)
+	switch {
+	case errors.Is(err, codexpool.ErrOrderNeedsOrderedBalance):
 		return fmt.Errorf("-%s-account-order requires -%s-balance=priority or failover", provider, provider)
-	}
-	if mode == codexpool.BalancePriority && limit == 0 {
+	case errors.Is(err, codexpool.ErrPriorityNeedsLimit):
 		return fmt.Errorf("-%s-balance=priority requires -%s-max-in-flight; "+
 			"use failover to move only on rate limits", provider, provider)
 	}
-	pool.SetMaxInFlight(limit)
-	return pool.SetBalance(mode, names)
+	return err
 }
 
 type accountOptions struct {
@@ -356,7 +356,9 @@ func runServe(
 	}
 	if calls != nil {
 		managerWait.Go(func() {
-			pruneCalls(managerCtx, calls, opts.retention, stderr)
+			calls.Run(managerCtx, opts.retention, func(err error) {
+				_, _ = fmt.Fprintf(stderr, "rute proxy: call history: %v\n", err)
+			})
 		})
 	}
 	defer func() {
@@ -424,22 +426,6 @@ func openCallStore(path string) (*callstore.Store, error) {
 		return nil, fmt.Errorf("create call history directory: %w", err)
 	}
 	return callstore.Open(path)
-}
-
-// pruneCalls deletes call history older than retention every hour.
-func pruneCalls(ctx context.Context, calls *callstore.Store, retention time.Duration, stderr io.Writer) {
-	ticker := time.NewTicker(time.Hour)
-	defer ticker.Stop()
-	for {
-		if _, err := calls.Prune(ctx, time.Now().Add(-retention)); err != nil && ctx.Err() == nil {
-			_, _ = fmt.Fprintf(stderr, "rute proxy: could not prune call history: %v\n", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
 }
 
 func runAccount(
@@ -672,13 +658,13 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		&opts.metricsDB,
 		"metrics-db",
 		"",
-		`SQLite call history for the dashboard (default: metrics.db in the state directory), or "off"`,
+		`SQLite per-minute call counters for the dashboard (default: metrics.db in the state directory), or "off"`,
 	)
 	flags.DurationVar(
 		&opts.retention,
 		"metrics-retention",
 		defaultRetention,
-		"how long to keep call history",
+		"how long to keep per-minute call counters in -metrics-db",
 	)
 	flags.StringVar(
 		&opts.metricsFile,

@@ -199,14 +199,19 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		records, err = calls.Since(context.Background(), time.Now().Add(-window))
+		counters, err := calls.Summary(context.Background(), time.Now().Add(-window))
 		_ = calls.Close()
 		if err != nil {
 			return err
 		}
-		if len(records) == 0 {
+		if len(counters) == 0 {
 			return fmt.Errorf("no calls in %s in the last %s", database, window)
 		}
+		rows := make([]latency.Row, 0, len(counters))
+		for _, item := range counters {
+			rows = append(rows, item.Row())
+		}
+		return latency.WriteTable(stdout, rows, "IN FLIGHT", false)
 	}
 	for _, path := range flags.Args() {
 		file, err := os.Open(path)

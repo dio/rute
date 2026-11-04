@@ -23,12 +23,11 @@ import (
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/codexpool"
-	"github.com/dio/rute/internal/latency"
 )
 
 const (
 	defaultLoginTimeout = 5 * time.Minute
-	maxRecent           = 500
+	maxRecent           = 1000
 	maxFormBytes        = 16 << 10
 )
 
@@ -42,8 +41,6 @@ var windows = []struct {
 	{"24h", 24 * time.Hour},
 	{"7d", 7 * 24 * time.Hour},
 }
-
-var defaultBuckets = []int{1, 3, 6, 12, 24, 48}
 
 //go:embed templates/*.html
 var templateFiles embed.FS
@@ -106,11 +103,14 @@ func New(config Config) (*Server, error) {
 	server.mux.HandleFunc("GET /accounts/new", server.handleNewAccount)
 	server.mux.HandleFunc("POST /accounts", server.handleAccountForm)
 	server.mux.HandleFunc("GET /logins/{id}", server.handleLoginPage)
+	server.mux.HandleFunc("GET /providers/{provider}/routing", server.handleRoutingPage)
+	server.mux.HandleFunc("POST /providers/{provider}/routing", server.handleRoutingForm)
 	server.mux.HandleFunc("GET /v1/status", server.handleStatus)
 	server.mux.HandleFunc("GET /v1/calls/summary", server.handleSummary)
 	server.mux.HandleFunc("GET /v1/calls/recent", server.handleRecent)
 	server.mux.HandleFunc("POST /v1/logins", server.handleLoginAPI)
 	server.mux.HandleFunc("GET /v1/logins/{id}", server.handleLoginStatus)
+	server.mux.HandleFunc("PUT /v1/providers/{provider}/routing", server.handleRoutingAPI)
 	return server, nil
 }
 
@@ -188,6 +188,8 @@ type SummaryRow struct {
 	RateLimited  int      `json:"rate_limited"`
 	Canceled     int      `json:"canceled"`
 	Errors       int      `json:"errors"`
+	Failovers    int64    `json:"failovers"`
+	OutputTokens int64    `json:"output_tokens"`
 	WaitP50MS    *float64 `json:"wait_p50_ms"`
 	WaitP90MS    *float64 `json:"wait_p90_ms"`
 	TokensPerSec *float64 `json:"tokens_per_second_p50"`
@@ -200,19 +202,20 @@ func (server *Server) handleSummary(writer http.ResponseWriter, request *http.Re
 		writeError(writer, http.StatusBadRequest, "window must be 15m, 1h, 24h, or 7d")
 		return
 	}
-	records, err := server.history(request.Context(), window)
+	counters, err := server.history(request.Context(), window)
 	if err != nil {
 		writeHistoryError(writer, err)
 		return
 	}
-	rows := summarizeByInFlight(records)
-	response := make([]SummaryRow, 0, len(rows))
-	for _, row := range rows {
-		provider, account, _ := strings.Cut(row.Group, "/")
+	response := make([]SummaryRow, 0, len(counters))
+	for _, item := range counters {
+		row := item.Row()
 		response = append(response, SummaryRow{
-			Provider:     provider,
-			Account:      account,
-			InFlight:     row.Bucket,
+			Provider:     item.Provider,
+			Account:      item.Account,
+			InFlight:     item.InFlight,
+			Failovers:    item.Failovers,
+			OutputTokens: item.OutputTokens,
 			Calls:        row.Calls,
 			OK:           row.OK,
 			RateLimited:  row.RateLimited,
@@ -241,15 +244,7 @@ func (server *Server) handleRecent(writer http.ResponseWriter, request *http.Req
 		writeHistoryError(writer, errHistoryDisabled)
 		return
 	}
-	records, err := server.config.Calls.Recent(request.Context(), limit)
-	if err != nil {
-		writeHistoryError(writer, err)
-		return
-	}
-	if records == nil {
-		records = []latency.Record{}
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"calls": records})
+	writeJSON(writer, http.StatusOK, map[string]any{"calls": server.config.Calls.Recent(limit)})
 }
 
 type loginRequest struct {
@@ -299,11 +294,11 @@ func (server *Server) handleLoginStatus(writer http.ResponseWriter, request *htt
 
 var errHistoryDisabled = errors.New("call history is disabled; start rute without -metrics-db=off")
 
-func (server *Server) history(ctx context.Context, window windowRange) ([]latency.Record, error) {
+func (server *Server) history(ctx context.Context, window windowRange) ([]*callstore.Counters, error) {
 	if server.config.Calls == nil {
 		return nil, errHistoryDisabled
 	}
-	return server.config.Calls.Since(ctx, time.Now().Add(-window.duration))
+	return server.config.Calls.Summary(ctx, time.Now().Add(-window.duration))
 }
 
 func writeHistoryError(writer http.ResponseWriter, err error) {
@@ -329,37 +324,6 @@ func parseWindow(value string) (windowRange, bool) {
 		}
 	}
 	return windowRange{}, false
-}
-
-func accountGroup(record latency.Record) string {
-	account := record.Account
-	if account == "" {
-		account = "-"
-	}
-	return record.Provider + "/" + account
-}
-
-func summarizeByInFlight(records []latency.Record) []latency.Row {
-	return latency.Summarize(
-		records,
-		func(record latency.Record) (string, int) {
-			return latency.BucketLabel(defaultBuckets, max(1, record.InFlight))
-		},
-		accountGroup,
-	)
-}
-
-func summarizeByAccount(records []latency.Record) map[string]latency.Row {
-	rows := latency.Summarize(
-		records,
-		func(latency.Record) (string, int) { return "", 0 },
-		accountGroup,
-	)
-	byAccount := make(map[string]latency.Row, len(rows))
-	for _, row := range rows {
-		byAccount[row.Group] = row
-	}
-	return byAccount
 }
 
 func finite(value float64) *float64 {

@@ -496,19 +496,61 @@ func (pool *Pool) SetBalance(mode Balance, names []string) error {
 	}
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	order := make(map[string]int, len(names))
-	for index, name := range names {
-		if pool.accountByNameLocked(name) == nil {
-			return fmt.Errorf("codexpool: %s account %q in account order does not exist", pool.provider, name)
-		}
-		if _, duplicate := order[name]; duplicate {
-			return fmt.Errorf("codexpool: account %q appears twice in account order", name)
-		}
-		order[name] = index
+	order, err := pool.orderLocked(names)
+	if err != nil {
+		return err
 	}
 	pool.balance = mode
 	pool.order = order
 	return nil
+}
+
+// Routing errors returned by SetRouting.
+var (
+	ErrOrderNeedsOrderedBalance = errors.New("an account order requires the priority or failover balance")
+	ErrPriorityNeedsLimit       = errors.New("the priority balance requires a max in flight; " +
+		"use failover to move only on rate limits")
+)
+
+// SetRouting validates and applies a balance mode, account order, and
+// per-account in-flight limit together. On error nothing changes.
+func (pool *Pool) SetRouting(mode Balance, names []string, limit int) error {
+	if _, err := ParseBalance(string(mode)); err != nil {
+		return err
+	}
+	if len(names) > 0 && mode == BalanceSpread {
+		return ErrOrderNeedsOrderedBalance
+	}
+	if limit < 0 {
+		return errors.New("max in flight must not be negative")
+	}
+	if mode == BalancePriority && limit == 0 {
+		return ErrPriorityNeedsLimit
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	order, err := pool.orderLocked(names)
+	if err != nil {
+		return err
+	}
+	pool.balance = mode
+	pool.order = order
+	pool.maxInFlight = limit
+	return nil
+}
+
+func (pool *Pool) orderLocked(names []string) (map[string]int, error) {
+	order := make(map[string]int, len(names))
+	for index, name := range names {
+		if pool.accountByNameLocked(name) == nil {
+			return nil, fmt.Errorf("codexpool: %s account %q in account order does not exist", pool.provider, name)
+		}
+		if _, duplicate := order[name]; duplicate {
+			return nil, fmt.Errorf("codexpool: account %q appears twice in account order", name)
+		}
+		order[name] = index
+	}
+	return order, nil
 }
 
 // rankLocked returns the priority of the account at index; lower is earlier.

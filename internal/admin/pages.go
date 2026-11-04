@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dio/rute/internal/accountstore"
+	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/codexpool"
 	"github.com/dio/rute/internal/latency"
 )
@@ -18,7 +19,11 @@ type dashboardView struct {
 	Uptime    string
 	Window    string
 	Windows   []string
+	Refresh   refreshOption
+	Refreshes []refreshOption
 	History   bool
+	// Partial explains that history does not cover the whole window.
+	Partial   string
 	Error     string
 	CSRF      string
 	Providers []providerView
@@ -42,6 +47,7 @@ type accountView struct {
 	Calls     int
 	OK        string
 	Limited   string
+	Failover  string
 	WaitP50   string
 	Rate      string
 	CanReauth bool
@@ -53,6 +59,7 @@ type latencyView struct {
 	Calls    int
 	OK       string
 	Limited  string
+	Failover string
 	Canceled string
 	Errors   string
 	WaitP50  string
@@ -73,34 +80,61 @@ type recentView struct {
 	Tokens   string
 }
 
+// refreshOption is a dashboard auto-refresh choice. Seconds is zero for off.
+type refreshOption struct {
+	Name    string
+	Seconds int
+}
+
+var refreshOptions = []refreshOption{
+	{"5s", 5},
+	{"15s", 15},
+	{"1m", 60},
+	{"off", 0},
+}
+
+func parseRefresh(value string) refreshOption {
+	for _, option := range refreshOptions {
+		if option.Name == value {
+			return option
+		}
+	}
+	return refreshOptions[0]
+}
+
 func (server *Server) handleDashboard(writer http.ResponseWriter, request *http.Request) {
 	window, ok := parseWindow(request.URL.Query().Get("window"))
 	if !ok {
 		window, _ = parseWindow("")
 	}
+	refresh := parseRefresh(request.URL.Query().Get("refresh"))
 	status := server.status()
 	view := dashboardView{
-		Version: status.Version,
-		Uptime:  formatDuration(time.Duration(status.UptimeSeconds) * time.Second),
-		Window:  window.name,
-		History: status.History,
-		CSRF:    server.csrf,
+		Version:   status.Version,
+		Uptime:    formatDuration(time.Duration(status.UptimeSeconds) * time.Second),
+		Window:    window.name,
+		Refresh:   refresh,
+		Refreshes: refreshOptions,
+		History:   status.History,
+		CSRF:      server.csrf,
 	}
 	for _, item := range windows {
 		view.Windows = append(view.Windows, item.name)
 	}
 
-	var byAccount map[string]latency.Row
+	var accounts map[string]*callstore.Counters
 	if status.History {
-		records, err := server.history(request.Context(), window)
+		counters, err := server.history(request.Context(), window)
 		if err != nil {
 			view.Error = "could not read call history"
 		} else {
-			byAccount = summarizeByAccount(records)
-			for _, row := range summarizeByInFlight(records) {
+			accounts = callstore.ByAccount(counters)
+			for _, item := range counters {
+				row := item.Row()
 				view.Latency = append(view.Latency, latencyView{
 					Account:  row.Group,
 					InFlight: row.Bucket,
+					Failover: fmt.Sprint(item.Failovers),
 					Calls:    row.Calls,
 					OK:       latency.Share(row.OK, row.Calls),
 					Limited:  latency.Share(row.RateLimited, row.Calls),
@@ -113,22 +147,22 @@ func (server *Server) handleDashboard(writer http.ResponseWriter, request *http.
 				})
 			}
 		}
-		recent, err := server.config.Calls.Recent(request.Context(), recentOnDashboard)
-		if err != nil {
-			view.Error = "could not read call history"
+		oldest, err := server.config.Calls.Oldest(request.Context())
+		if err == nil && !oldest.IsZero() && oldest.After(time.Now().Add(-window.duration)) {
+			view.Partial = "history starts " + formatClock(oldest)
 		}
-		for _, record := range recent {
+		for _, record := range server.config.Calls.Recent(recentOnDashboard) {
 			view.Recent = append(view.Recent, recentRow(record))
 		}
 	}
 
 	for _, provider := range status.Providers {
-		view.Providers = append(view.Providers, providerRow(provider, byAccount))
+		view.Providers = append(view.Providers, providerRow(provider, accounts))
 	}
 	server.render(writer, "dashboard.html", view)
 }
 
-func providerRow(status codexpool.Status, byAccount map[string]latency.Row) providerView {
+func providerRow(status codexpool.Status, accounts map[string]*callstore.Counters) providerView {
 	view := providerView{Name: status.Provider}
 	var active, cooling, reauth int
 	for _, account := range status.Accounts {
@@ -138,6 +172,7 @@ func providerRow(status codexpool.Status, byAccount map[string]latency.Row) prov
 			InFlight: account.InFlight,
 			OK:       "-",
 			Limited:  "-",
+			Failover: "-",
 			WaitP50:  "-",
 			Rate:     "-",
 		}
@@ -158,10 +193,12 @@ func providerRow(status codexpool.Status, byAccount map[string]latency.Row) prov
 			active++
 			row.State = "active"
 		}
-		if stats, ok := byAccount[status.Provider+"/"+account.Name]; ok {
+		if counters, ok := accounts[status.Provider+"/"+account.Name]; ok {
+			stats := counters.Row()
 			row.Calls = stats.Calls
 			row.OK = latency.Share(stats.OK, stats.Calls)
 			row.Limited = fmt.Sprint(stats.RateLimited)
+			row.Failover = fmt.Sprint(counters.Failovers)
 			row.WaitP50 = latency.Seconds(stats.WaitP50)
 			row.Rate = latency.Rate(stats.TokensPerSec)
 		}

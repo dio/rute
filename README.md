@@ -342,6 +342,12 @@ shows:
 `rute account add` and `rute account reauth`, and the account joins the
 running pool without a restart. Removing accounts stays in the CLI.
 
+**change routing** sets a provider's balance mode, account order, and max in
+flight, with the same rules as the `-<provider>-balance`,
+`-<provider>-account-order`, and `-<provider>-max-in-flight` flags. The change
+applies to new calls at once and lasts until rute restarts. To keep it, set
+the flags too.
+
 The same data is available as JSON:
 
 | Request | Returns |
@@ -351,19 +357,29 @@ The same data is available as JSON:
 | `GET /v1/calls/recent?limit=50` | the newest calls |
 | `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
 | `GET /v1/logins/{id}` | the login's `state`: `pending`, `done`, or `failed` |
+| `PUT /v1/providers/claude/routing` with `{"balance":"priority","order":["default","personal"],"max_in_flight":6}` | the provider's new status; invalid routing returns 400 and changes nothing |
 
 The management port never contains credentials, but it can add accounts, so
 it is loopback-only and separate from the proxy port. Do not forward it with
 Tailscale Serve. It rejects requests whose `Host` is not a loopback name, the
-dashboard's forms carry a per-process token, and `POST /v1/logins` requires a
-JSON body. Use `-admin-listen=127.0.0.1:PORT` to move it or
+dashboard's forms carry a per-process token, and the `POST` and `PUT` API
+requests require a JSON body. Use `-admin-listen=127.0.0.1:PORT` to move it or
 `-admin-listen=off` to disable it.
 
-Call history for the dashboard is kept in `metrics.db` in rute's state
+Call history is stored as per-minute counters in `metrics.db` in rute's state
 directory (`~/Library/Application Support/rute/` on macOS,
-`~/.local/state/rute/` on Linux) for 30 days. `-metrics-retention` changes
-how long it is kept; `-metrics-db=PATH` moves it and `-metrics-db=off`
-disables it. `rute stats` without file arguments reads the same database.
+`~/.local/state/rute/` on Linux). Each row counts calls, outcomes, failovers,
+and output tokens for one account and calls-in-flight range, with histograms
+for wait and tokens per second. Prompts, responses, and individual calls are
+never written to disk, so the file stays small. Wait and tok/s percentiles are
+estimates from the histograms.
+
+Counters are written every 10 seconds and kept for 30 days
+(`-metrics-retention`). `-metrics-db=PATH` moves the file and
+`-metrics-db=off` disables it. `rute stats` without file arguments reads the
+same database. The dashboard's recent-calls list holds the last 1000 calls in
+memory and starts empty after a restart. For per-call records, use
+`-metrics-file`.
 
 ### Measuring latency under concurrency
 
