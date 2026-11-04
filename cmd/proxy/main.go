@@ -26,10 +26,13 @@ import (
 	"github.com/dio/rute/internal/claudeauth"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/idle"
 	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/internal/modelcatalog"
 	"github.com/dio/rute/internal/pricing"
 	"github.com/dio/rute/internal/proxy"
+	"github.com/dio/rute/internal/routingfile"
+	"github.com/dio/rute/internal/serverfile"
 	"github.com/dio/rute/oauthpkce"
 	"github.com/dio/rute/providers/claude"
 	"github.com/dio/rute/providers/codex"
@@ -67,6 +70,44 @@ type options struct {
 	claudeMaxCalls int
 	codexBalance   balanceOptions
 	claudeBalance  balanceOptions
+	routingFile    string
+	serverFile     string
+	// routingFlags names the providers whose routing flags were given.
+	routingFlags map[string]bool
+	idleTimeout  time.Duration
+	initialLogin bool
+}
+
+// applyRouting configures pool from its routing flags when any is given,
+// otherwise from the saved routing file, otherwise from the flag defaults.
+func applyRouting(
+	opts options,
+	routing *routingfile.File,
+	provider string,
+	pool *codexpool.Pool,
+	stderr io.Writer,
+) error {
+	balance, limit := opts.codexBalance, opts.codexMaxCalls
+	if provider == accountstore.ProviderClaude {
+		balance, limit = opts.claudeBalance, opts.claudeMaxCalls
+	}
+	if routing != nil && !opts.routingFlags[provider] {
+		saved, err := routing.Load()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "rute proxy: ignoring saved routing: %v\n", err)
+		} else if item, ok := saved[provider]; ok {
+			mode, err := codexpool.ParseBalance(item.Balance)
+			if err == nil {
+				err = pool.SetRouting(mode, item.Order, item.MaxInFlight)
+			}
+			if err == nil {
+				_, _ = fmt.Fprintf(stderr, "using saved %s routing from %s\n", provider, routing.Path())
+				return nil
+			}
+			_, _ = fmt.Fprintf(stderr, "rute proxy: ignoring saved %s routing: %v\n", provider, err)
+		}
+	}
+	return balance.apply(pool, provider, limit)
 }
 
 type balanceOptions struct {
@@ -122,6 +163,10 @@ func main() {
 		os.Stderr,
 		os.Getenv,
 	); err != nil {
+		var code exitCodeError
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		fmt.Fprintf(os.Stderr, "rute proxy: %v\n", err)
 		os.Exit(1)
 	}
@@ -156,6 +201,12 @@ func run(
 	if len(args) > 0 && args[0] == "bench" {
 		return runBench(ctx, args[1:], stdout, stderr, getenv)
 	}
+	if len(args) > 0 && (args[0] == accountstore.ProviderClaude || args[0] == accountstore.ProviderCodex) {
+		return runLaunch(ctx, args[0], args[1:], stderr, getenv)
+	}
+	if len(args) > 0 && args[0] == "admin" {
+		return runAdmin(ctx, args[1:], stdout, stderr, getenv)
+	}
 	if len(args) > 0 && args[0] == "stats" {
 		return runStats(args[1:], stdout, stderr)
 	}
@@ -174,6 +225,18 @@ func runServe(
 	opts, err := parseOptions(args, stderr)
 	if err != nil {
 		return err
+	}
+	if opts.serverFile != "off" {
+		lock, err := serverfile.Lock(filepath.Dir(opts.serverFile))
+		if errors.Is(err, serverfile.ErrRunning) {
+			if info, readErr := serverfile.Read(opts.serverFile); readErr == nil {
+				return fmt.Errorf("%w (process %d, dashboard %s)", err, info.PID, info.AdminURL)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		defer func() { _ = lock.Close() }()
 	}
 	listenAddress, err := normalizeListenAddress(opts.listenAddress)
 	if err != nil {
@@ -226,7 +289,7 @@ func runServe(
 		if err != nil {
 			return storageHint(opts.credentialKind, err)
 		}
-		if len(codexCredentials.Accounts()) == 0 &&
+		if opts.initialLogin && len(codexCredentials.Accounts()) == 0 &&
 			len(claudeCredentials.Accounts()) == 0 {
 			tokens, err := login(
 				ctx,
@@ -264,19 +327,15 @@ func runServe(
 		}
 	}
 
-	if err := opts.codexBalance.apply(
-		codexCredentials,
-		accountstore.ProviderCodex,
-		opts.codexMaxCalls,
-	); err != nil {
+	var routing *routingfile.File
+	if opts.routingFile != "off" {
+		routing = routingfile.New(opts.routingFile)
+	}
+	if err := applyRouting(opts, routing, accountstore.ProviderCodex, codexCredentials, stderr); err != nil {
 		return err
 	}
 	if claudeCredentials != nil {
-		if err := opts.claudeBalance.apply(
-			claudeCredentials,
-			accountstore.ProviderClaude,
-			opts.claudeMaxCalls,
-		); err != nil {
+		if err := applyRouting(opts, routing, accountstore.ProviderClaude, claudeCredentials, stderr); err != nil {
 			return err
 		}
 	}
@@ -301,6 +360,7 @@ func runServe(
 	if len(sinks) > 0 {
 		metrics = sinks
 	}
+	activity := idle.New()
 	handler, err := proxy.NewMulti(proxy.Config{
 		DefaultModel: opts.defaultModel,
 		ModelCatalog: catalog,
@@ -316,7 +376,7 @@ func runServe(
 	}
 	defer listener.Close()
 
-	servers := []*http.Server{newHTTPServer(handler, stderr)}
+	servers := []*http.Server{newHTTPServer(activity.Middleware(handler), stderr)}
 	listeners := []net.Listener{listener}
 	if opts.adminListen != "off" {
 		adminAddress, err := normalizeListenAddress(opts.adminListen)
@@ -333,6 +393,10 @@ func runServe(
 			Pools:        pools,
 			Calls:        calls,
 			Prices:       pricing.NewFile(opts.prices),
+			Routing:      routing,
+			ProxyURL:     "http://" + listener.Addr().String(),
+			Activity:     activity,
+			IdleTimeout:  opts.idleTimeout,
 			LoginTimeout: opts.loginTimeout,
 		})
 		if err != nil {
@@ -376,6 +440,22 @@ func runServe(
 		}()
 	}
 
+	if opts.serverFile != "off" {
+		info := serverfile.Info{
+			PID:      os.Getpid(),
+			Version:  version,
+			Started:  time.Now().UTC(),
+			ProxyURL: "http://" + listener.Addr().String(),
+		}
+		if len(listeners) > 1 {
+			info.AdminURL = "http://" + listeners[1].Addr().String()
+		}
+		if err := serverfile.Write(opts.serverFile, info); err != nil {
+			return fmt.Errorf("write %s: %w", opts.serverFile, err)
+		}
+		defer func() { _ = serverfile.Remove(opts.serverFile, info.PID) }()
+	}
+
 	fmt.Fprintf(stderr, "rute proxy listening on http://%s\n", listener.Addr())
 	if len(listeners) > 1 {
 		_, _ = fmt.Fprintf(stderr, "rute management on http://%s\n", listeners[1].Addr())
@@ -391,6 +471,18 @@ func runServe(
 		_, _ = fmt.Fprintf(stderr, "keeping call history in %s\n", opts.metricsDB)
 	}
 
+	idleCtx, cancelIdle := context.WithCancel(ctx)
+	defer cancelIdle()
+	stopIdle := make(chan struct{})
+	if opts.idleTimeout > 0 {
+		_, _ = fmt.Fprintf(stderr, "stopping after %s with no calls and no attached clients\n", opts.idleTimeout)
+		go func() {
+			if activity.Wait(idleCtx, opts.idleTimeout, idleCheckInterval) {
+				close(stopIdle)
+			}
+		}()
+	}
+
 	var firstErr error
 	select {
 	case serveErr := <-serveErrors:
@@ -398,7 +490,10 @@ func runServe(
 			firstErr = serveErr
 		}
 	case <-ctx.Done():
+	case <-stopIdle:
+		_, _ = fmt.Fprintf(stderr, "rute proxy: idle for %s; stopping\n", opts.idleTimeout)
 	}
+	activity.Stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	for _, server := range servers {
@@ -716,14 +811,50 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 				"(priority and failover; default: order added)",
 		)
 	}
+	flags.StringVar(
+		&opts.routingFile,
+		"routing-file",
+		"",
+		`routing saved from the dashboard, used when no routing flags are given (default: routing.json in the state directory), or "off"`,
+	)
+	flags.StringVar(
+		&opts.serverFile,
+		"server-file",
+		"",
+		`file recording this server's URLs and process, which also allows one server per state directory (default: server.json in the state directory), or "off"`,
+	)
+	flags.DurationVar(
+		&opts.idleTimeout,
+		"idle-timeout",
+		0,
+		"stop after this long with no calls and no attached clients (0: never)",
+	)
+	flags.BoolVar(
+		&opts.initialLogin,
+		"initial-login",
+		true,
+		"start a Codex browser login when no accounts exist",
+	)
 	addStorageFlags(flags, &opts.credentialKind, &opts.credentialFile)
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
+	opts.routingFlags = map[string]bool{}
+	flags.Visit(func(flag *flag.Flag) {
+		for _, provider := range []string{accountstore.ProviderCodex, accountstore.ProviderClaude} {
+			switch flag.Name {
+			case provider + "-balance", provider + "-account-order", provider + "-max-in-flight":
+				opts.routingFlags[provider] = true
+			}
+		}
+	})
+	if opts.idleTimeout < 0 {
+		return options{}, errors.New("idle-timeout must not be negative")
+	}
 	if opts.retention <= 0 {
 		return options{}, errors.New("metrics-retention must be positive")
 	}
-	if opts.metricsDB == "" || opts.prices == "" {
+	if opts.metricsDB == "" || opts.prices == "" || opts.routingFile == "" || opts.serverFile == "" {
 		dir, err := accountstore.DefaultStateDir()
 		if err != nil {
 			return options{}, err
@@ -733,6 +864,12 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		}
 		if opts.prices == "" {
 			opts.prices = filepath.Join(dir, "prices.json")
+		}
+		if opts.routingFile == "" {
+			opts.routingFile = filepath.Join(dir, "routing.json")
+		}
+		if opts.serverFile == "" {
+			opts.serverFile = filepath.Join(dir, "server.json")
 		}
 	}
 	if opts.codexMaxCalls < 0 || opts.claudeMaxCalls < 0 {
@@ -747,7 +884,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	if opts.loginTimeout <= 0 {
 		return options{}, errors.New("login-timeout must be positive")
 	}
-	if err := validateStorageOptions(opts.credentialKind, opts.credentialFile); err != nil {
+	if err := resolveStorageOptions(&opts.credentialKind, opts.credentialFile); err != nil {
 		return options{}, err
 	}
 	return opts, nil
@@ -846,7 +983,7 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 	if (opts.action == "add" || opts.action == "reauth") && opts.loginTimeout <= 0 {
 		return accountOptions{}, errors.New("login-timeout must be positive")
 	}
-	if err := validateStorageOptions(opts.credentialKind, opts.credentialFile); err != nil {
+	if err := resolveStorageOptions(&opts.credentialKind, opts.credentialFile); err != nil {
 		return accountOptions{}, err
 	}
 	return opts, nil
@@ -860,8 +997,8 @@ func addStorageFlags(
 	flags.StringVar(
 		kind,
 		"credential-store",
-		defaultStoreKind,
-		"credential storage: keyring, file, or memory",
+		"",
+		"credential storage: keyring, file, or memory (default: the store that already has accounts, else keyring)",
 	)
 	flags.StringVar(
 		path,
@@ -871,13 +1008,29 @@ func addStorageFlags(
 	)
 }
 
-func validateStorageOptions(kind, path string) error {
-	switch kind {
+// resolveStorageOptions validates the storage flags and, when no store is
+// given, picks the store that already holds accounts: the keyring when its
+// account list exists, otherwise the credential file when it exists,
+// otherwise the keyring.
+func resolveStorageOptions(kind *string, path string) error {
+	if *kind == "" {
+		*kind = defaultStoreKind
+		manifest, manifestErr := accountstore.DefaultManifestPath()
+		credentials, credentialsErr := accountstore.DefaultCredentialsPath()
+		switch {
+		case path != "":
+			*kind = "file"
+		case manifestErr == nil && fileExists(manifest):
+		case credentialsErr == nil && fileExists(credentials):
+			*kind = "file"
+		}
+	}
+	switch *kind {
 	case "keyring", "file", "memory":
 	default:
 		return errors.New("credential-store must be keyring, file, or memory")
 	}
-	if path != "" && kind != "file" {
+	if path != "" && *kind != "file" {
 		return errors.New("credential-file requires credential-store=file")
 	}
 	return nil
@@ -997,4 +1150,12 @@ func tokensFromEnvironment(getenv func(string) string) (oauthpkce.TokenSet, erro
 	}
 	tokens.Expiry = expiry
 	return tokens, nil
+}
+
+// idleCheckInterval is how often serve checks -idle-timeout.
+var idleCheckInterval = 30 * time.Second
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

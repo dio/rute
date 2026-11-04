@@ -23,7 +23,9 @@ import (
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/idle"
 	"github.com/dio/rute/internal/pricing"
+	"github.com/dio/rute/internal/routingfile"
 )
 
 const (
@@ -56,6 +58,15 @@ type Config struct {
 	Calls *callstore.Store
 	// Prices, when set, estimates usage costs.
 	Prices *pricing.File
+	// Routing, when set, saves routing changes so they survive restarts.
+	Routing *routingfile.File
+	// ProxyURL is the base URL of the proxy listener, for clients.
+	ProxyURL string
+	// Activity, when set, counts attached clients as activity.
+	Activity *idle.Tracker
+	// IdleTimeout is how long the server stays up without activity; zero
+	// means it stays up.
+	IdleTimeout time.Duration
 	// StartSession begins account logins. It defaults to StartOAuthSession.
 	StartSession SessionStarter
 	LoginTimeout time.Duration
@@ -110,6 +121,7 @@ func New(config Config) (*Server, error) {
 	server.mux.HandleFunc("GET /providers/{provider}/routing", server.handleRoutingPage)
 	server.mux.HandleFunc("POST /providers/{provider}/routing", server.handleRoutingForm)
 	server.mux.HandleFunc("GET /v1/status", server.handleStatus)
+	server.mux.HandleFunc("GET /v1/attach", server.handleAttach)
 	server.mux.HandleFunc("GET /v1/calls/summary", server.handleSummary)
 	server.mux.HandleFunc("GET /v1/calls/recent", server.handleRecent)
 	server.mux.HandleFunc("GET /v1/usage", server.handleUsageAPI)
@@ -149,19 +161,24 @@ func loopbackHost(hostport string) bool {
 
 // StatusResponse is the body of GET /v1/status.
 type StatusResponse struct {
-	Version       string             `json:"version"`
-	Started       time.Time          `json:"started"`
-	UptimeSeconds int64              `json:"uptime_seconds"`
-	History       bool               `json:"history"`
-	Providers     []codexpool.Status `json:"providers"`
+	Version       string    `json:"version"`
+	Started       time.Time `json:"started"`
+	UptimeSeconds int64     `json:"uptime_seconds"`
+	History       bool      `json:"history"`
+	ProxyURL      string    `json:"proxy_url,omitempty"`
+	// IdleTimeoutSeconds is zero when the server does not stop when idle.
+	IdleTimeoutSeconds int64              `json:"idle_timeout_seconds"`
+	Providers          []codexpool.Status `json:"providers"`
 }
 
 func (server *Server) status() StatusResponse {
 	response := StatusResponse{
-		Version:       server.config.Version,
-		Started:       server.config.Started.UTC(),
-		UptimeSeconds: int64(time.Since(server.config.Started).Seconds()),
-		History:       server.config.Calls != nil,
+		Version:            server.config.Version,
+		Started:            server.config.Started.UTC(),
+		UptimeSeconds:      int64(time.Since(server.config.Started).Seconds()),
+		History:            server.config.Calls != nil,
+		ProxyURL:           server.config.ProxyURL,
+		IdleTimeoutSeconds: int64(server.config.IdleTimeout.Seconds()),
 	}
 	for _, provider := range server.providers() {
 		response.Providers = append(response.Providers, server.config.Pools[provider].Status())
@@ -180,6 +197,27 @@ func (server *Server) providers() []string {
 
 func (server *Server) handleStatus(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, server.status())
+}
+
+// handleAttach keeps the server from stopping when idle for as long as the
+// request stays open. Launchers hold it while their client runs.
+func (server *Server) handleAttach(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write([]byte("attached\n"))
+	if flusher, ok := writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	if server.config.Activity == nil {
+		<-request.Context().Done()
+		return
+	}
+	end := server.config.Activity.Begin()
+	defer end()
+	select {
+	case <-request.Context().Done():
+	case <-server.config.Activity.Stopping():
+	}
 }
 
 // SummaryRow is one row of GET /v1/calls/summary. Timing fields are null when

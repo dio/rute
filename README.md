@@ -28,6 +28,41 @@ brew install dio/tap/rute
 brew upgrade rute
 ```
 
+## Quick start
+
+Run Claude Code or the Codex CLI through rute:
+
+```sh
+rute claude
+rute codex
+```
+
+Every argument after `rute claude` or `rute codex` goes to the client, so
+`rute codex --yolo` and `rute claude --resume` work. A leading `--` is
+dropped, as in `rute codex -- --yolo`.
+
+The command:
+
+1. finds a running rute, or starts `rute serve` in the background on free
+   loopback ports;
+2. when the provider has no account yet, opens a browser to sign one in as
+   `default`;
+3. runs the client pointed at rute: `ANTHROPIC_BASE_URL` for Claude Code, and
+   `-c` provider overrides for Codex, so `~/.codex/config.toml` is left
+   unchanged; and
+4. returns the client's exit code.
+
+A background rute keeps running while any client started this way is open,
+and stops three hours after the last one exits with no calls in between. It
+logs to `rute.log` in the state directory. Only one rute runs per state
+directory; the running server records its URLs and process ID in
+`server.json` there.
+
+`rute admin` opens the [dashboard](#management-dashboard-and-api) of the
+running rute, starting one when none is running. Routing changed there is
+saved to `routing.json` in the state directory, so the next background rute
+uses it.
+
 ## Local proxy
 
 > [!IMPORTANT]
@@ -177,6 +212,12 @@ rute -credential-store=memory
 
 The file backend uses `0600` files inside a `0700` state directory. Override
 its location with `-credential-file=/absolute/path/credentials.json`.
+
+Without `-credential-store`, rute uses the store that already has accounts:
+the keyring when its account list (`accounts.json`) exists in the state
+directory, otherwise the file store when `credentials.json` exists there,
+otherwise the keyring. Commands that share a state directory therefore use the
+same accounts without repeating the flag.
 For portable or headless provisioning, one file can hold multiple accounts
 across multiple providers. See
 [docs/credentials.md](docs/credentials.md) for the complete credential-bundle
@@ -327,9 +368,10 @@ Measure your own with the tools below.
 
 ### Management dashboard and API
 
-`rute serve` also listens on `127.0.0.1:20129` for management. Open
-http://127.0.0.1:20129 for a dashboard that refreshes every five seconds and
-shows:
+`rute serve` also listens on `127.0.0.1:20129` for management. A rute
+started by `rute claude`, `rute codex`, or `rute admin` picks free ports
+instead; `rute admin` opens its dashboard. Open http://127.0.0.1:20129 for a
+dashboard that refreshes every five seconds and shows:
 
 - each provider's balance mode and account counts;
 - each account's state, cooldown end and reason (for example `seven_day`),
@@ -345,8 +387,9 @@ running pool without a restart. Removing accounts stays in the CLI.
 **change routing** sets a provider's balance mode, account order, and max in
 flight, with the same rules as the `-<provider>-balance`,
 `-<provider>-account-order`, and `-<provider>-max-in-flight` flags. The change
-applies to new calls at once and lasts until rute restarts. To keep it, set
-the flags too.
+applies to new calls at once and is saved to `routing.json` in the state
+directory (`-routing-file`). At startup, rute uses the saved routing for a
+provider unless any of that provider's routing flags is given.
 
 The same data is available as JSON:
 
