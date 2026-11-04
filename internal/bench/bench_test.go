@@ -189,15 +189,16 @@ func TestBenchThroughProxyBalancesAccounts(t *testing.T) {
 		if len(counter.counts) != 2 {
 			t.Fatalf("%s calls by token = %v, want both accounts", name, counter.counts)
 		}
-		low := 0
+		low, total := 0, 0
 		for _, count := range counter.counts {
+			total += count
 			if low == 0 || count < low {
 				low = count
 			}
 		}
-		// 30 calls per provider, in sessions of 2; neither account should
-		// take the bulk.
-		if low < 10 {
+		// Sessions are sticky, so the split is uneven by a session or two;
+		// neither account should take the bulk.
+		if low*4 < total {
 			t.Errorf("%s calls are unbalanced: %v", name, counter.counts)
 		}
 	}

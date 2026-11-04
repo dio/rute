@@ -342,7 +342,7 @@ func runServe(
 		if err != nil {
 			return fmt.Errorf("listen on %s: %w", adminAddress, err)
 		}
-		defer adminListener.Close()
+		defer func() { _ = adminListener.Close() }()
 		servers = append(servers, newHTTPServer(adminHandler, stderr))
 		listeners = append(listeners, adminListener)
 	}
