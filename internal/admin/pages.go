@@ -42,6 +42,7 @@ type providerView struct {
 type accountView struct {
 	Provider  string
 	Name      string
+	Auth      string
 	State     string
 	Attention bool
 	InFlight  int
@@ -52,6 +53,13 @@ type accountView struct {
 	WaitP50   string
 	Rate      string
 	CanReauth bool
+}
+
+func authLabel(mode accountstore.AuthMode) string {
+	if mode == accountstore.AuthModeAPIKey {
+		return "api key"
+	}
+	return "oauth"
 }
 
 type latencyView struct {
@@ -171,6 +179,7 @@ func providerRow(status codexpool.Status, accounts map[string]*callstore.Counter
 		row := accountView{
 			Provider: status.Provider,
 			Name:     account.Name,
+			Auth:     authLabel(account.AuthMode),
 			InFlight: account.InFlight,
 			OK:       "-",
 			Limited:  "-",

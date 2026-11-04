@@ -61,11 +61,18 @@ type Options struct {
 	OpenBrowser func(authorizationURL string) error
 }
 
-// Authenticate runs the browser login and returns the provisioned credentials.
-func Authenticate(ctx context.Context, opts Options) (Credentials, error) {
-	if opts.OpenBrowser == nil {
-		return Credentials{}, errors.New("commandcodeauth: OpenBrowser is required")
-	}
+// Session is an in-progress browser login. The caller supplies the
+// authorization URL to the user (and usually opens it), then calls Wait.
+type Session struct {
+	authorizationURL string
+	timeout          time.Duration
+	server           *http.Server
+	results          chan result
+	closeOnce        sync.Once
+}
+
+// Start begins a login without opening a browser.
+func Start(opts Options) (*Session, error) {
 	studio := strings.TrimRight(strings.TrimSpace(opts.StudioBaseURL), "/")
 	if studio == "" {
 		studio = commandcode.StudioBaseURL
@@ -80,14 +87,13 @@ func Authenticate(ctx context.Context, opts Options) (Credentials, error) {
 	}
 	state, err := randomState()
 	if err != nil {
-		return Credentials{}, err
+		return nil, err
 	}
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(opts.Port)))
 	if err != nil {
-		return Credentials{}, fmt.Errorf("commandcodeauth: listen for callback: %w", err)
+		return nil, fmt.Errorf("commandcodeauth: listen for callback: %w", err)
 	}
 	callbackURL := "http://" + listener.Addr().String() + commandcode.CallbackPath
-	authorizationURL := buildAuthorizationURL(studio, callbackURL, state)
 
 	var (
 		once    sync.Once
@@ -103,19 +109,26 @@ func Authenticate(ctx context.Context, opts Options) (Credentials, error) {
 	go func() {
 		_ = server.Serve(listener)
 	}()
-	defer func() {
-		_ = server.Close()
-	}()
+	return &Session{
+		authorizationURL: buildAuthorizationURL(studio, callbackURL, state),
+		timeout:          timeout,
+		server:           server,
+		results:          results,
+	}, nil
+}
 
-	if opts.OnAuthorizationURL != nil {
-		opts.OnAuthorizationURL(authorizationURL)
-	}
-	_ = opts.OpenBrowser(authorizationURL)
+// AuthorizationURL is the URL the user must open to authorize the login.
+func (session *Session) AuthorizationURL() string {
+	return session.authorizationURL
+}
 
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+// Wait blocks until the browser completes the login or ctx is done, or the
+// login times out.
+func (session *Session) Wait(ctx context.Context) (Credentials, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, session.timeout)
 	defer cancel()
 	select {
-	case value := <-results:
+	case value := <-session.results:
 		return value.credentials, value.err
 	case <-waitCtx.Done():
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
@@ -123,6 +136,29 @@ func Authenticate(ctx context.Context, opts Options) (Credentials, error) {
 		}
 		return Credentials{}, waitCtx.Err()
 	}
+}
+
+// Close stops the callback server.
+func (session *Session) Close() error {
+	session.closeOnce.Do(func() { _ = session.server.Close() })
+	return nil
+}
+
+// Authenticate runs the browser login and returns the provisioned credentials.
+func Authenticate(ctx context.Context, opts Options) (Credentials, error) {
+	if opts.OpenBrowser == nil {
+		return Credentials{}, errors.New("commandcodeauth: OpenBrowser is required")
+	}
+	session, err := Start(opts)
+	if err != nil {
+		return Credentials{}, err
+	}
+	defer func() { _ = session.Close() }()
+	if opts.OnAuthorizationURL != nil {
+		opts.OnAuthorizationURL(session.AuthorizationURL())
+	}
+	_ = opts.OpenBrowser(session.AuthorizationURL())
+	return session.Wait(ctx)
 }
 
 type result struct {

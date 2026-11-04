@@ -11,6 +11,7 @@ import (
 
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/commandcodeauth"
 	"github.com/dio/rute/oauthpkce"
 	"github.com/dio/rute/providers/claude"
 	"github.com/dio/rute/providers/codex"
@@ -40,8 +41,58 @@ type Session interface {
 	Close() error
 }
 
-// SessionStarter begins an OAuth authorization for provider.
-type SessionStarter func(provider string) (Session, error)
+// APIKeySession is a login that provisions a static API key instead of OAuth
+// tokens, as Command Code does.
+type APIKeySession interface {
+	AuthorizationURL() string
+	WaitAPIKey(ctx context.Context) (commandcodeauth.Credentials, error)
+	Close() error
+}
+
+// Pending is an account login in progress, of either kind. The login manager
+// completes it by type.
+type Pending interface {
+	AuthorizationURL() string
+	Close() error
+}
+
+// SessionStarter begins an account login for provider.
+type SessionStarter func(provider string) (Pending, error)
+
+// StartSession begins the provider's login: an Authorization Code + PKCE flow
+// for Codex and Claude, and a browser API-key login for Command Code, as
+// `rute account add` does.
+func StartSession(provider string) (Pending, error) {
+	if provider == accountstore.ProviderCommandCode {
+		session, err := commandcodeauth.Start(commandcodeauth.Options{})
+		if err != nil {
+			return nil, err
+		}
+		return commandCodeSession{session: session}, nil
+	}
+	session, err := StartOAuthSession(provider)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// commandCodeSession adapts a Command Code browser login to Pending.
+type commandCodeSession struct {
+	session *commandcodeauth.Session
+}
+
+func (session commandCodeSession) AuthorizationURL() string {
+	return session.session.AuthorizationURL()
+}
+
+func (session commandCodeSession) WaitAPIKey(ctx context.Context) (commandcodeauth.Credentials, error) {
+	return session.session.Wait(ctx)
+}
+
+func (session commandCodeSession) Close() error {
+	return session.session.Close()
+}
 
 // StartOAuthSession begins the provider's Authorization Code + PKCE flow with
 // a loopback callback, as `rute account add` does.
@@ -144,21 +195,39 @@ func (manager *logins) begin(provider, name, action string) (Login, error) {
 	return *login, nil
 }
 
-func (manager *logins) complete(id string, pool *codexpool.Pool, session Session) {
-	defer func() { _ = session.Close() }()
+func (manager *logins) complete(id string, pool *codexpool.Pool, pending Pending) {
+	defer func() { _ = pending.Close() }()
 	manager.mu.Lock()
 	login := *manager.items[id]
 	manager.mu.Unlock()
 
 	ctx, cancel := context.WithDeadline(context.Background(), login.ExpiresAt)
 	defer cancel()
-	tokens, err := session.Wait(ctx)
-	if err == nil {
-		if login.Action == ActionAdd {
-			_, err = pool.Add(ctx, login.Name, tokens)
-		} else {
-			err = pool.Reauth(ctx, login.Name, tokens)
+
+	var err error
+	switch session := pending.(type) {
+	case APIKeySession:
+		var credentials commandcodeauth.Credentials
+		credentials, err = session.WaitAPIKey(ctx)
+		if err == nil {
+			if login.Action == ActionAdd {
+				_, err = pool.AddAPIKey(ctx, login.Name, credentials.APIKey, credentials.UserID)
+			} else {
+				err = pool.SetAPIKey(ctx, login.Name, credentials.APIKey, credentials.UserID)
+			}
 		}
+	case Session:
+		var tokens oauthpkce.TokenSet
+		tokens, err = session.Wait(ctx)
+		if err == nil {
+			if login.Action == ActionAdd {
+				_, err = pool.Add(ctx, login.Name, tokens)
+			} else {
+				err = pool.Reauth(ctx, login.Name, tokens)
+			}
+		}
+	default:
+		err = errors.New("admin: unsupported login session")
 	}
 
 	manager.mu.Lock()

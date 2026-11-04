@@ -434,9 +434,12 @@ dashboard that refreshes every five seconds and shows:
   week; and
 - the most recent calls.
 
-**Add account** and **log in again** run the same OAuth login as
-`rute account add` and `rute account reauth`, and the account joins the
-running pool without a restart. Removing accounts stays in the CLI.
+**Add account** and **log in again** run the same login as `rute account add`
+and `rute account reauth` — the browser OAuth flow for Codex and Claude, and
+the Command Code browser login that provisions an API key — and the account
+joins the running pool without a restart. Each account row shows its auth mode
+(`oauth` or `api key`). Adding an API key you already have, and removing
+accounts, stay in the CLI.
 
 **change routing** sets a provider's balance mode, account order, and max in
 flight, with the same rules as the `-<provider>-balance`,
@@ -744,8 +747,8 @@ sent to the wrong endpoint is passed through as Command Code's own `400`.
 
 API keys are stored like refresh tokens: the native keyring by default, or a
 `0600` JSON file with `-credential-store=file`. They are secrets; never commit
-or log them. The management dashboard lists API-key accounts, but adding and
-rotating them stays in the CLI.
+or log them. The dashboard can add a Command Code account through the browser
+login; supplying a key you already have, and rotating keys, stay in the CLI.
 
 ### Running the Command Code CLI through rute
 

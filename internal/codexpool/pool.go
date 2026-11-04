@@ -700,12 +700,13 @@ func (pool *Pool) rankLocked(item *account, index int) int {
 // AccountStatus describes one account for status views. It contains no
 // credentials.
 type AccountStatus struct {
-	Name          string             `json:"name"`
-	State         accountstore.State `json:"state"`
-	InFlight      int                `json:"in_flight"`
-	CooldownUntil *time.Time         `json:"cooldown_until,omitempty"`
-	RateLimited   bool               `json:"rate_limited,omitempty"`
-	Reason        string             `json:"reason,omitempty"`
+	Name          string                `json:"name"`
+	AuthMode      accountstore.AuthMode `json:"auth_mode,omitempty"`
+	State         accountstore.State    `json:"state"`
+	InFlight      int                   `json:"in_flight"`
+	CooldownUntil *time.Time            `json:"cooldown_until,omitempty"`
+	RateLimited   bool                  `json:"rate_limited,omitempty"`
+	Reason        string                `json:"reason,omitempty"`
 }
 
 // Status describes a provider's pool for status views.
@@ -740,6 +741,7 @@ func (pool *Pool) Status() Status {
 	for index, item := range pool.accounts {
 		account := AccountStatus{
 			Name:     item.record.Name,
+			AuthMode: item.record.AuthMode,
 			State:    item.record.State,
 			InFlight: item.inFlight,
 		}

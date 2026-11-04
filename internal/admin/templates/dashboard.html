@@ -16,10 +16,11 @@
 {{range .Providers}}
 <h3>{{.Name}} <span class="muted">· {{.Balance}}</span> <a href="/providers/{{.Name}}/routing">change routing</a></h3>
 <div class="scroll"><table>
-  <tr><th>account</th><th>state</th><th class="n">in flight</th><th class="n">calls</th><th class="n">ok</th><th class="n">429</th><th class="n">failovers</th><th class="n">wait p50</th><th class="n">tok/s p50</th><th></th></tr>
+  <tr><th>account</th><th>auth</th><th>state</th><th class="n">in flight</th><th class="n">calls</th><th class="n">ok</th><th class="n">429</th><th class="n">failovers</th><th class="n">wait p50</th><th class="n">tok/s p50</th><th></th></tr>
   {{range .Accounts}}
   <tr>
     <td>{{.Name}}</td>
+    <td class="muted">{{.Auth}}</td>
     <td{{if .Attention}} class="attention"{{end}}>{{.State}}</td>
     <td class="n">{{.InFlight}}</td>
     <td class="n">{{.Calls}}</td>
@@ -36,7 +37,7 @@
       <button>log in again</button></form>{{end}}</td>
   </tr>
   {{else}}
-  <tr><td colspan="10" class="muted">no accounts</td></tr>
+  <tr><td colspan="11" class="muted">no accounts</td></tr>
   {{end}}
 </table></div>
 <p><a href="/accounts/new?provider={{.Name}}">add {{.Name}} account</a></p>

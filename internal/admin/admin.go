@@ -70,7 +70,8 @@ type Config struct {
 	// Restart, when set, starts a replacement server on the same addresses
 	// in the background.
 	Restart func() error
-	// StartSession begins account logins. It defaults to StartOAuthSession.
+	// StartSession begins account logins. When nil, the package's
+	// provider-aware StartSession is used.
 	StartSession SessionStarter
 	LoginTimeout time.Duration
 }
@@ -90,7 +91,7 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("admin: at least one pool is required")
 	}
 	if config.StartSession == nil {
-		config.StartSession = StartOAuthSession
+		config.StartSession = StartSession
 	}
 	if config.LoginTimeout <= 0 {
 		config.LoginTimeout = defaultLoginTimeout
@@ -396,7 +397,9 @@ func writeError(writer http.ResponseWriter, status int, message string) {
 }
 
 func validProvider(provider string) bool {
-	return provider == accountstore.ProviderCodex || provider == accountstore.ProviderClaude
+	return provider == accountstore.ProviderCodex ||
+		provider == accountstore.ProviderClaude ||
+		provider == accountstore.ProviderCommandCode
 }
 
 func (server *Server) checkCSRF(request *http.Request) bool {

@@ -78,7 +78,7 @@ func newFixture(t *testing.T) *fixture {
 		Version:      "test",
 		Pools:        map[string]*codexpool.Pool{accountstore.ProviderClaude: pool},
 		Calls:        calls,
-		StartSession: func(string) (Session, error) { return session, nil },
+		StartSession: func(string) (Pending, error) { return session, nil },
 		LoginTimeout: 5 * time.Second,
 	})
 	if err != nil {
