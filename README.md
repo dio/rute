@@ -454,7 +454,7 @@ The same data is available as JSON:
 
 | Request | Returns |
 | --- | --- |
-| `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts |
+| `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts (each with its auth mode) |
 | `GET /v1/calls/summary?window=1h` | call statistics by account and calls in flight (`15m`, `1h`, `24h`, `7d`) |
 | `GET /v1/calls/recent?limit=50` | the newest calls |
 | `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
@@ -823,9 +823,9 @@ accepts:
 - `RUTE_CODEX_EXPIRES_AT` (optional RFC3339 timestamp)
 
 When `RUTE_CODEX_ACCESS_TOKEN` is set, the environment credential is exclusive
-and ephemeral: persistent Codex and Claude accounts are not loaded, and rotated
-refresh tokens are not written back anywhere. Environment mode therefore does
-not provide multi-account or multi-provider operation.
+and ephemeral: persistent Codex, Claude, and Command Code accounts are not
+loaded, and rotated refresh tokens are not written back anywhere. Environment
+mode therefore does not provide multi-account or multi-provider operation.
 
 See [docs/credentials.md](docs/credentials.md) for provisioning, deployment,
 rotation, and recovery details.
@@ -893,12 +893,14 @@ belong to `cmd/proxy` and its internal credential manager.
 
 ## Provider notice
 
-The Codex and Claude profiles mirror observed first-party CLI protocols. They
-are not official compatibility promises. OAuth client behavior, endpoints,
-headers, and request rules can change. Callers are responsible for complying
-with each provider's terms and account policies. Rute deliberately sends only
-the protocol headers needed for OAuth access; it does not spoof a first-party
-CLI's operating system, runtime, SDK, or user-agent fingerprint.
+The Codex and Claude profiles mirror observed first-party CLI protocols, and
+the Command Code integration uses that product's documented Provider API and
+Studio login flow. They are not official compatibility promises. OAuth client
+behavior, endpoints, headers, and request rules can change. Callers are
+responsible for complying with each provider's terms and account policies. Rute
+deliberately sends only the protocol headers needed for OAuth access; it does
+not spoof a first-party CLI's operating system, runtime, SDK, or user-agent
+fingerprint.
 
 ## Development
 
