@@ -328,12 +328,14 @@ func (launcher *launcher) do(request *http.Request, target any) error {
 // client runs, and returns the function that releases it. It attaches again
 // when the server restarts, as rute admin reload does.
 func (launcher *launcher) attach() func() {
+	// A reload keeps the server's address, so the URL is read once.
+	url := launcher.adminURL + "/v1/attach"
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, launcher.adminURL+"/v1/attach", nil)
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
 				return
 			}
