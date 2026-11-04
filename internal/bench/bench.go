@@ -331,7 +331,7 @@ func (client *workerClient) webSocketCall(
 // read or write. The next call dials again.
 func (client *workerClient) dropConnection() {
 	if client.conn != nil {
-		client.conn.CloseNow()
+		_ = client.conn.CloseNow()
 		client.conn = nil
 	}
 }

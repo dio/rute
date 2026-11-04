@@ -114,7 +114,9 @@ func runBench(
 			},
 			func(latency.Record) string { return cfg.API + " " + cfg.Model },
 		)
-		fmt.Fprintln(stdout)
+		if _, err := fmt.Fprintln(stdout); err != nil {
+			return err
+		}
 		if err := latency.WriteTable(stdout, rows, "WORKERS", true); err != nil {
 			return err
 		}

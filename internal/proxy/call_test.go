@@ -60,7 +60,7 @@ func TestCodexRateLimitIsReportedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer connection.CloseNow()
+	defer func() { _ = connection.CloseNow() }()
 	if err := connection.Write(ctx, websocket.MessageText,
 		[]byte(`{"type":"response.create","model":"gpt-test","input":"ping"}`)); err != nil {
 		t.Fatal(err)
