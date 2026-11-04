@@ -24,6 +24,7 @@ type fakeManagement struct {
 	attached atomic.Int32
 	mu       sync.Mutex
 	accounts []codexpool.AccountStatus
+	proxyURL string
 	logins   int
 	polls    int
 }
@@ -37,11 +38,16 @@ func (fake *fakeManagement) ServeHTTP(writer http.ResponseWriter, request *http.
 	defer fake.mu.Unlock()
 	switch {
 	case request.URL.Path == "/v1/status":
+		proxyURL := fake.proxyURL
+		if proxyURL == "" {
+			proxyURL = "http://127.0.0.1:20999"
+		}
 		_ = json.NewEncoder(writer).Encode(admin.StatusResponse{
-			ProxyURL: "http://127.0.0.1:20999",
+			ProxyURL: proxyURL,
 			Providers: []codexpool.Status{
 				{Provider: "claude", Accounts: fake.accounts},
 				{Provider: "codex", Accounts: fake.accounts},
+				{Provider: "commandcode", Accounts: fake.accounts},
 			},
 		})
 	case request.URL.Path == "/v1/logins" && request.Method == http.MethodPost:
@@ -154,7 +160,7 @@ func TestLaunchStartsServerAndSignsInDefaultAccount(t *testing.T) {
 	if *spawned != 1 || fake.logins != 1 {
 		t.Fatalf("spawned %d, logins %d; want 1 each\n%s", *spawned, fake.logins, stderr)
 	}
-	for _, want := range []string{"started in the background", "Sign in in your browser", `saved codex account "default"`} {
+	for _, want := range []string{"started in the background", "Sign in in your browser", `saved Codex account "default"`} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}

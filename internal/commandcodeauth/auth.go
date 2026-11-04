@@ -175,7 +175,18 @@ func callbackHandler(
 		query := request.URL.Query()
 		if !constantTimeEqual(query.Get("state"), state) {
 			writeCallbackPage(writer, http.StatusForbidden, "Authorization failed",
-				"The state token did not match this login attempt. Return to your terminal and retry.")
+				"The state token did not match this login attempt. Open the URL rute printed, "+
+					"or start a new login.")
+			// A callback that carries a result belongs to a different login
+			// attempt, so fail now instead of waiting out the timeout. A bare
+			// request (a probe or prefetch) is ignored so it cannot abort a
+			// login that is still in progress.
+			if query.Get("apiKey") != "" || query.Get("error") != "" {
+				complete(result{err: errors.New(
+					"commandcodeauth: the callback did not match this login attempt; " +
+						"open the URL rute printed, or start a new login",
+				)})
+			}
 			return
 		}
 		if code := query.Get("error"); code != "" {

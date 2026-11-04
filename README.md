@@ -434,14 +434,13 @@ dashboard that refreshes every five seconds and shows:
   week; and
 - the most recent calls.
 
-**Add account** and **log in again** run the same login as `rute account add`
-and `rute account reauth` — the browser OAuth flow for Codex and Claude, and
-the Command Code browser login that provisions an API key — and the account
-joins the running pool without a restart. The form also takes an optional API
-key: paste one to store an API-key account for any provider, or leave it blank
-to authorize in the browser. Each account row shows its auth mode (`oauth` or
-`api key`), offers **log in again** for OAuth accounts and **replace key** for
-API-key accounts, and removing accounts stays in the CLI.
+**Add account**, **log in again**, **replace key**, and **remove** run the same
+actions as `rute account add`, `rute account reauth`, and `rute account
+remove`, and the change joins the running pool without a restart. The add form
+takes an optional API key: paste one to store an API-key account for any
+provider, or leave it blank to authorize in the browser. Each account row shows
+its auth mode (`oauth` or `api key`), offers **log in again** for OAuth accounts
+and **replace key** for API-key accounts, and can be removed.
 
 **change routing** sets a provider's balance mode, account order, and max in
 flight, with the same rules as the `-<provider>-balance`,
@@ -457,7 +456,7 @@ The same data is available as JSON:
 | `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts (each with its auth mode) |
 | `GET /v1/calls/summary?window=1h` | call statistics by account and calls in flight (`15m`, `1h`, `24h`, `7d`) |
 | `GET /v1/calls/recent?limit=50` | the newest calls |
-| `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
+| `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add`, `reauth`, or `remove`. With an `api_key` field, an `add` or `reauth` stores the key instead of returning a login, and `remove` deletes the account |
 | `GET /v1/logins/{id}` | the login's `state`: `pending`, `done`, or `failed` |
 | `GET /v1/usage?window=7d&by=day` | tokens and estimated cost per period, account, and model (`window`: `24h`, `7d`, `30d`; `by`: `hour`, `day`, `total`) |
 | `POST /v1/restart` with `{}` | restarts rute on the same ports (202); 503 when it was started with `-server-file=off` |
@@ -772,6 +771,10 @@ The `rute` entry points the CLI at the local proxy with a keyless endpoint
 (`apiKey: false`), so its models appear under `rute/` in `/model`. An existing
 `rute` entry, and every other provider in the file, is left untouched; edit or
 remove the entry by hand to change it.
+
+When rute has no accounts yet, `rute cmd` signs in to Command Code first, the
+same browser login `rute account add -provider=commandcode` uses. With accounts
+already configured, it runs the CLI directly.
 
 ### Supplying credentials non-interactively
 

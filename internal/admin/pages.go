@@ -312,6 +312,14 @@ func (server *Server) handleAccountForm(writer http.ResponseWriter, request *htt
 		})
 	}
 
+	if action == ActionRemove {
+		if err := server.logins.remove(provider, name); err != nil {
+			renderError(err.Error())
+			return
+		}
+		http.Redirect(writer, request, "/", http.StatusSeeOther)
+		return
+	}
 	if apiKey := strings.TrimSpace(request.PostFormValue("api_key")); apiKey != "" {
 		if _, err := server.logins.putKey(provider, name, action, apiKey); err != nil {
 			renderError(err.Error())

@@ -263,7 +263,7 @@ func (launcher *launcher) ensureAccount(ctx context.Context, provider string, st
 		return fmt.Errorf("start %s login: %w", provider, err)
 	}
 	_, _ = fmt.Fprintf(launcher.stderr, "rute: no %s account yet. Sign in in your browser:\n  %s\n",
-		provider, login.AuthorizationURL)
+		providerDisplayName(provider), login.AuthorizationURL)
 	if err := launcher.openBrowser(login.AuthorizationURL); err != nil {
 		_, _ = fmt.Fprintln(launcher.stderr, "rute: could not open a browser; open the link above")
 	}
@@ -278,7 +278,7 @@ func (launcher *launcher) ensureAccount(ctx context.Context, provider string, st
 		}
 		switch login.State {
 		case admin.LoginDone:
-			_, _ = fmt.Fprintf(launcher.stderr, "rute: saved %s account \"default\"\n", provider)
+			_, _ = fmt.Fprintf(launcher.stderr, "rute: saved %s account \"default\"\n", providerDisplayName(provider))
 			return nil
 		case admin.LoginFailed:
 			return fmt.Errorf("%s login failed: %s", provider, login.Error)
