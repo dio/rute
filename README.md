@@ -28,6 +28,43 @@ brew install dio/tap/rute
 brew upgrade rute
 ```
 
+To build from source into a directory on your personal `PATH`:
+
+```sh
+CGO_ENABLED=0 go build -o "$HOME/.local/bin/rute" ./cmd/proxy
+```
+
+### Files and locations
+
+| What | macOS | Linux |
+| --- | --- | --- |
+| Binary from a release archive | `/usr/local/bin/rute`, or a directory on your `PATH` such as `~/.local/bin` | same |
+| Binary from Homebrew | `$(brew --prefix)/bin/rute` | same |
+| State directory | `~/Library/Application Support/rute/` | `$XDG_STATE_HOME/rute/`, default `~/.local/state/rute/` |
+| Credential bundle (`-credential-store=file`) | `<state>/credentials.json` | same |
+| Account manifest (`-credential-store=keyring`) | `<state>/accounts.json` | same |
+| Refresh tokens (`-credential-store=keyring`) | Keychain services `rute/codex` and `rute/claude` | Secret Service, same service names |
+| Credential audit log | `<credentials.json or accounts.json>.audit.jsonl` | same |
+| Call counters for the dashboard and usage | `<state>/metrics.db` | same |
+| Estimated prices (`-prices`) | `<state>/prices.json`, created by you | same |
+| Routing saved from the dashboard | `<state>/routing.json` | same |
+| Running server's URLs and process | `<state>/server.json`, with the lock `<state>/server.lock` | same |
+| Background rute log | `<state>/rute.log` | same |
+| Call records (`-metrics-file`) | the path you pass, for example `~/Library/Logs/rute/calls.jsonl` | the path you pass, for example `~/.local/state/rute/calls.jsonl` |
+| Service definition | `~/Library/LaunchAgents/io.github.dio.rute.plist` | `~/.config/systemd/user/rute.service` |
+| Service logs | `~/Library/Logs/rute/proxy.log` and `proxy.error.log` | `journalctl --user -u rute.service` |
+
+rute creates the state directory with mode `0700` and its files with mode
+`0600`. `-credential-file` overrides the credential bundle path. Each file next
+to a credential file with a `.lock` suffix is a lock file used to serialize
+writes; leave it in place.
+
+`rute claude`, `rute codex`, and `rute admin` start rute in the background
+when it is not running, and it stops when idle; see [Quick start](#quick-start).
+`rute serve` runs it in the foreground and stops on Ctrl-C. The service
+definitions in [Access from other devices with Tailscale](#access-from-other-devices-with-tailscale)
+keep it running all the time on the fixed ports instead.
+
 ## Quick start
 
 Run Claude Code or the Codex CLI through rute:
