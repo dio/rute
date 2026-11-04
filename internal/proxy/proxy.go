@@ -39,7 +39,7 @@ type credentialSource interface {
 		excluded map[string]struct{},
 	) (codexpool.Lease, error)
 	ForceRefresh(ctx context.Context, accountID string) (codexpool.Lease, error)
-	MarkRateLimited(accountID string, until time.Time)
+	MarkRateLimited(accountID string, until time.Time, reason string)
 	MarkAuthorizationFailure(accountID string)
 	Release(accountID string)
 }
@@ -53,7 +53,7 @@ type Config struct {
 	MaxRequestSize    int64
 	ModelCatalog      *modelcatalog.Catalog
 	// Metrics, when set, receives one latency record per inference call.
-	Metrics *latency.Writer
+	Metrics latency.Sink
 	// Log, when set, receives one line per upstream rate-limit response with
 	// the account name, upstream error type and message, and rate-limit
 	// headers. It never receives credentials or request content.
@@ -256,9 +256,9 @@ func (handler *Handler) codexAttempts(
 			}
 		}
 		until := rateLimitUntil(response)
-		handler.logRateLimit(accountstore.ProviderCodex, lease.AccountName, response, until)
+		reason := handler.logRateLimit(accountstore.ProviderCodex, lease.AccountName, response, until)
 		discardResponse(response)
-		credentials.MarkRateLimited(lease.AccountID, until)
+		credentials.MarkRateLimited(lease.AccountID, until, reason)
 		excluded[lease.AccountID] = struct{}{}
 		call.retry()
 	}
@@ -266,17 +266,15 @@ func (handler *Handler) codexAttempts(
 
 const maxLoggedMessage = 300
 
-// logRateLimit reports why the upstream refused a call. rateLimitUntil has
-// already buffered the body, so it can be read again here.
+// logRateLimit reports why the upstream refused a call and returns a short
+// reason: Claude's exhausted quota window, or the upstream error type.
+// rateLimitUntil has already buffered the body, so it can be read again here.
 func (handler *Handler) logRateLimit(
 	provider string,
 	account string,
 	response *http.Response,
 	until time.Time,
-) {
-	if handler.config.Log == nil {
-		return
-	}
+) string {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes))
 	response.Body = io.NopCloser(bytes.NewReader(body))
 	var envelope struct {
@@ -287,6 +285,13 @@ func (handler *Handler) logRateLimit(
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(body, &envelope)
+	reason := response.Header.Get("Anthropic-Ratelimit-Unified-Representative-Claim")
+	if reason == "" {
+		reason = envelope.Error.Type
+	}
+	if handler.config.Log == nil {
+		return reason
+	}
 	message := envelope.Error.Message
 	if len(message) > maxLoggedMessage {
 		message = message[:maxLoggedMessage] + "..."
@@ -310,6 +315,7 @@ func (handler *Handler) logRateLimit(
 		message,
 		strings.Join(limits, " "),
 	)
+	return reason
 }
 
 func authorizationStatus(status int) bool {

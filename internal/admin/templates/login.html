@@ -1,0 +1,21 @@
+{{template "head"}}
+{{if .Pending}}<meta http-equiv="refresh" content="3">{{end}}
+<title>rute · login</title>
+</head>
+<body>
+<header><b><a href="/">rute</a></b><span>{{.Login.Action}} {{.Login.Provider}} account “{{.Login.Name}}”</span></header>
+<div class="box">
+{{if .Pending}}
+  <p>Open this link and approve access:</p>
+  <p><a href="{{.Login.AuthorizationURL}}" target="_blank" rel="noopener noreferrer">{{.Login.AuthorizationURL}}</a></p>
+  <p class="muted">waiting for login · {{.Remaining}} left</p>
+{{else if eq .Login.State "done"}}
+  <p class="attention">Done. {{.Login.Provider}} account “{{.Login.Name}}” is available now.</p>
+  <p><a href="/">back to dashboard</a></p>
+{{else}}
+  <p class="attention">Login failed: {{.Login.Error}}</p>
+  <p><a href="/accounts/new?provider={{.Login.Provider}}">try again</a> · <a href="/">back to dashboard</a></p>
+{{end}}
+</div>
+</body>
+</html>

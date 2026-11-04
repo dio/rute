@@ -325,6 +325,46 @@ queue or reject them. `priority` requires a `-*-max-in-flight` limit.
 The limits above are a starting point from one set of agent benchmarks.
 Measure your own with the tools below.
 
+### Management dashboard and API
+
+`rute serve` also listens on `127.0.0.1:20129` for management. Open
+http://127.0.0.1:20129 for a dashboard that refreshes every five seconds and
+shows:
+
+- each provider's balance mode and account counts;
+- each account's state, cooldown end and reason (for example `seven_day`),
+  calls in flight, and call statistics;
+- calls grouped by calls in flight, for the last 15 minutes, hour, day, or
+  week; and
+- the most recent calls.
+
+**Add account** and **log in again** run the same OAuth login as
+`rute account add` and `rute account reauth`, and the account joins the
+running pool without a restart. Removing accounts stays in the CLI.
+
+The same data is available as JSON:
+
+| Request | Returns |
+| --- | --- |
+| `GET /v1/status` | version, uptime, and each provider's balance mode, order, limit, and accounts |
+| `GET /v1/calls/summary?window=1h` | call statistics by account and calls in flight (`15m`, `1h`, `24h`, `7d`) |
+| `GET /v1/calls/recent?limit=50` | the newest calls |
+| `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add` or `reauth` |
+| `GET /v1/logins/{id}` | the login's `state`: `pending`, `done`, or `failed` |
+
+The management port never contains credentials, but it can add accounts, so
+it is loopback-only and separate from the proxy port. Do not forward it with
+Tailscale Serve. It rejects requests whose `Host` is not a loopback name, the
+dashboard's forms carry a per-process token, and `POST /v1/logins` requires a
+JSON body. Use `-admin-listen=127.0.0.1:PORT` to move it or
+`-admin-listen=off` to disable it.
+
+Call history for the dashboard is kept in `metrics.db` in rute's state
+directory (`~/Library/Application Support/rute/` on macOS,
+`~/.local/state/rute/` on Linux) for 30 days. `-metrics-retention` changes
+how long it is kept; `-metrics-db=PATH` moves it and `-metrics-db=off`
+disables it. `rute stats` without file arguments reads the same database.
+
 ### Measuring latency under concurrency
 
 `-metrics-file` appends one JSON line per inference call. A line contains the

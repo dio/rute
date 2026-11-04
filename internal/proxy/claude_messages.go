@@ -170,9 +170,9 @@ func (handler *Handler) claudeAttempts(
 			}
 		}
 		until := rateLimitUntil(response)
-		handler.logRateLimit(accountstore.ProviderClaude, lease.AccountName, response, until)
+		reason := handler.logRateLimit(accountstore.ProviderClaude, lease.AccountName, response, until)
 		discardResponse(response)
-		credentials.MarkRateLimited(lease.AccountID, until)
+		credentials.MarkRateLimited(lease.AccountID, until, reason)
 		excluded[lease.AccountID] = struct{}{}
 		call.retry()
 	}

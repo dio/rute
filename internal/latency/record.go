@@ -76,6 +76,25 @@ func milliseconds(duration time.Duration) float64 {
 	return float64(duration.Microseconds()) / 1000
 }
 
+// Sink receives records. Implementations must be safe for concurrent use.
+type Sink interface {
+	Write(Record) error
+}
+
+// Sinks writes each record to every sink, returning the first error.
+type Sinks []Sink
+
+// Write implements Sink.
+func (sinks Sinks) Write(record Record) error {
+	var first error
+	for _, sink := range sinks {
+		if err := sink.Write(record); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 // Writer appends records to a JSONL file. It is safe for concurrent use.
 type Writer struct {
 	mu     sync.Mutex

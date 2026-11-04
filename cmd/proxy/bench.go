@@ -8,11 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/bench"
+	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/latency"
 )
 
@@ -151,8 +154,10 @@ func parseLevels(value string) ([]int, error) {
 
 func runStats(args []string, stdout, stderr io.Writer) error {
 	var (
-		buckets string
-		by      string
+		buckets  string
+		by       string
+		database string
+		window   time.Duration
 	)
 	flags := flag.NewFlagSet("rute stats", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -160,11 +165,11 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		"ascending upper bounds of the calls-in-flight groups")
 	flags.StringVar(&by, "by", "provider",
 		"comma-separated grouping fields: provider, account, model, endpoint, source")
+	flags.StringVar(&database, "metrics-db", "",
+		"call history database to read when no JSONL files are given (default: metrics.db in the state directory)")
+	flags.DurationVar(&window, "window", 24*time.Hour, "how far back to read from the database")
 	if err := flags.Parse(args); err != nil {
 		return err
-	}
-	if flags.NArg() == 0 {
-		return errors.New("stats requires one or more JSONL files from -metrics-file or bench -output")
 	}
 	bounds, err := latency.ParseBuckets(buckets)
 	if err != nil {
@@ -179,6 +184,30 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	var records []latency.Record
+	if flags.NArg() == 0 {
+		if database == "" {
+			dir, err := accountstore.DefaultStateDir()
+			if err != nil {
+				return err
+			}
+			database = filepath.Join(dir, "metrics.db")
+		}
+		if _, err := os.Stat(database); err != nil {
+			return fmt.Errorf("no JSONL files given and no call history at %s", database)
+		}
+		calls, err := callstore.Open(database)
+		if err != nil {
+			return err
+		}
+		records, err = calls.Since(context.Background(), time.Now().Add(-window))
+		_ = calls.Close()
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			return fmt.Errorf("no calls in %s in the last %s", database, window)
+		}
+	}
 	for _, path := range flags.Args() {
 		file, err := os.Open(path)
 		if err != nil {

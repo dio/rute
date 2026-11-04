@@ -17,7 +17,7 @@ import (
 type upstreamCall struct {
 	ctx         context.Context
 	credentials credentialSource
-	metrics     *latency.Writer
+	metrics     latency.Sink
 	start       time.Time
 	record      latency.Record
 	lease       *codexpool.Lease

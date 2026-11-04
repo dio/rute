@@ -172,21 +172,21 @@ func WriteTable(writer io.Writer, rows []Row, bucketTitle string, throughput boo
 			row.Group,
 			row.Bucket,
 			row.Calls,
-			share(row.OK, row.Calls),
-			share(row.RateLimited, row.Calls),
-			share(row.Canceled, row.Calls),
-			share(row.Errors, row.Calls),
-			seconds(row.WaitP50),
-			seconds(row.WaitP90),
-			rate(row.TokensPerSec),
-			seconds(row.MeanDuration),
+			Share(row.OK, row.Calls),
+			Share(row.RateLimited, row.Calls),
+			Share(row.Canceled, row.Calls),
+			Share(row.Errors, row.Calls),
+			Seconds(row.WaitP50),
+			Seconds(row.WaitP90),
+			Rate(row.TokensPerSec),
+			Seconds(row.MeanDuration),
 		)
 		if throughput {
 			total := math.NaN()
 			if row.Wall > 0 {
 				total = float64(row.OutputTokens) / row.Wall.Seconds()
 			}
-			line += "\t" + rate(total)
+			line += "\t" + Rate(total)
 		}
 		if _, err := fmt.Fprintln(table, line+"\t"); err != nil {
 			return err
@@ -195,21 +195,24 @@ func WriteTable(writer io.Writer, rows []Row, bucketTitle string, throughput boo
 	return table.Flush()
 }
 
-func share(count, total int) string {
+// Share formats count as a whole percentage of total.
+func Share(count, total int) string {
 	if total == 0 {
 		return "-"
 	}
 	return fmt.Sprintf("%.0f%%", 100*float64(count)/float64(total))
 }
 
-func seconds(milliseconds float64) string {
+// Seconds formats milliseconds as seconds, or "-" for NaN.
+func Seconds(milliseconds float64) string {
 	if math.IsNaN(milliseconds) {
 		return "-"
 	}
 	return fmt.Sprintf("%.1fs", milliseconds/1000)
 }
 
-func rate(value float64) string {
+// Rate formats a per-second rate, or "-" for NaN.
+func Rate(value float64) string {
 	if math.IsNaN(value) {
 		return "-"
 	}
