@@ -1,7 +1,9 @@
 # rute
 
-`rute` contains a Go OAuth 2.0 Authorization Code + PKCE library and a small
-loopback-only compatibility proxy backed by Codex and Claude OAuth sessions.
+`rute` runs Claude Code and the Codex CLI on your subscription accounts. It
+spreads calls across several accounts, moves to another when one is
+rate-limited, and shows usage in a local dashboard. It is built on a Go OAuth
+2.0 Authorization Code + PKCE library, which you can also use on its own.
 
 ## Install
 
@@ -196,7 +198,7 @@ On Linux with systemd, create `~/.config/systemd/user/rute.service`. Replace
 
 ```ini
 [Unit]
-Description=rute local compatibility proxy
+Description=rute local proxy for Claude Code and Codex
 
 [Service]
 ExecStart=/absolute/path/to/rute serve -listen=127.0.0.1:20128 -credential-store=file
