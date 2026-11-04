@@ -23,6 +23,8 @@ type staticCredentials struct {
 	token        codexauth.Token
 	forceRefresh int
 	rateLimited  int
+	acquired     int
+	released     int
 }
 
 func (credentials *staticCredentials) Acquire(
@@ -32,7 +34,14 @@ func (credentials *staticCredentials) Acquire(
 ) (codexpool.Lease, error) {
 	credentials.mu.Lock()
 	defer credentials.mu.Unlock()
+	credentials.acquired++
 	return codexpool.Lease{AccountID: "static", Token: credentials.token}, nil
+}
+
+func (credentials *staticCredentials) Release(string) {
+	credentials.mu.Lock()
+	defer credentials.mu.Unlock()
+	credentials.released++
 }
 
 func (credentials *staticCredentials) ForceRefresh(

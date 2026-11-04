@@ -23,6 +23,7 @@ import (
 	"github.com/dio/rute/internal/claudeauth"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/internal/modelcatalog"
 	"github.com/dio/rute/internal/proxy"
 	"github.com/dio/rute/oauthpkce"
@@ -51,6 +52,39 @@ type options struct {
 	credentialKind string
 	credentialFile string
 	modelsFile     string
+	metricsFile    string
+	codexMaxCalls  int
+	claudeMaxCalls int
+	codexBalance   balanceOptions
+	claudeBalance  balanceOptions
+}
+
+type balanceOptions struct {
+	mode  string
+	order string
+}
+
+// apply configures pool's balance mode and limit.
+func (balance balanceOptions) apply(pool *codexpool.Pool, provider string, limit int) error {
+	mode, err := codexpool.ParseBalance(balance.mode)
+	if err != nil {
+		return fmt.Errorf("%s: %w", provider, err)
+	}
+	var names []string
+	for name := range strings.SplitSeq(balance.order, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) > 0 && mode == codexpool.BalanceSpread {
+		return fmt.Errorf("-%s-account-order requires -%s-balance=priority or failover", provider, provider)
+	}
+	if mode == codexpool.BalancePriority && limit == 0 {
+		return fmt.Errorf("-%s-balance=priority requires -%s-max-in-flight; "+
+			"use failover to move only on rate limits", provider, provider)
+	}
+	pool.SetMaxInFlight(limit)
+	return pool.SetBalance(mode, names)
 }
 
 type accountOptions struct {
@@ -108,6 +142,12 @@ func run(
 	}
 	if len(args) > 0 && args[0] == "account" {
 		return runAccount(ctx, args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "bench" {
+		return runBench(ctx, args[1:], stdout, stderr, getenv)
+	}
+	if len(args) > 0 && args[0] == "stats" {
+		return runStats(args[1:], stdout, stderr)
 	}
 	if len(args) > 0 && args[0] == "serve" {
 		args = args[1:]
@@ -214,9 +254,35 @@ func runServe(
 		}
 	}
 
+	if err := opts.codexBalance.apply(
+		codexCredentials,
+		accountstore.ProviderCodex,
+		opts.codexMaxCalls,
+	); err != nil {
+		return err
+	}
+	if claudeCredentials != nil {
+		if err := opts.claudeBalance.apply(
+			claudeCredentials,
+			accountstore.ProviderClaude,
+			opts.claudeMaxCalls,
+		); err != nil {
+			return err
+		}
+	}
+	var metrics *latency.Writer
+	if opts.metricsFile != "" {
+		metrics, err = latency.OpenWriter(opts.metricsFile)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = metrics.Close() }()
+	}
 	handler, err := proxy.NewMulti(proxy.Config{
 		DefaultModel: opts.defaultModel,
 		ModelCatalog: catalog,
+		Metrics:      metrics,
+		Log:          log.New(stderr, "rute proxy: ", 0),
 	}, codexCredentials, claudeCredentials)
 	if err != nil {
 		return err
@@ -258,6 +324,9 @@ func runServe(
 	fmt.Fprintln(stderr, "downstream authentication is disabled; loopback access only")
 	if catalog.Path() != "" {
 		_, _ = fmt.Fprintf(stderr, "loaded model mappings from %s\n", catalog.Path())
+	}
+	if opts.metricsFile != "" {
+		_, _ = fmt.Fprintf(stderr, "writing call latency records to %s\n", opts.metricsFile)
 	}
 
 	select {
@@ -500,9 +569,53 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		"",
 		"JSON model mapping file",
 	)
+	flags.StringVar(
+		&opts.metricsFile,
+		"metrics-file",
+		"",
+		"append one JSONL latency record per inference call to this file",
+	)
+	flags.IntVar(
+		&opts.codexMaxCalls,
+		"codex-max-in-flight",
+		0,
+		"calls per Codex account above which sessions move to a less loaded account (0: no limit)",
+	)
+	flags.IntVar(
+		&opts.claudeMaxCalls,
+		"claude-max-in-flight",
+		0,
+		"calls per Claude account above which sessions move to a less loaded account (0: no limit)",
+	)
+	for _, provider := range []struct {
+		name    string
+		balance *balanceOptions
+	}{
+		{accountstore.ProviderCodex, &opts.codexBalance},
+		{accountstore.ProviderClaude, &opts.claudeBalance},
+	} {
+		flags.StringVar(
+			&provider.balance.mode,
+			provider.name+"-balance",
+			string(codexpool.BalanceSpread),
+			"how calls use "+provider.name+" accounts: spread (least loaded), "+
+				"priority (in order, next one when busy or rate-limited), or "+
+				"failover (in order, next one only when rate-limited)",
+		)
+		flags.StringVar(
+			&provider.balance.order,
+			provider.name+"-account-order",
+			"",
+			"comma-separated "+provider.name+" account names, most preferred first "+
+				"(priority and failover; default: order added)",
+		)
+	}
 	addStorageFlags(flags, &opts.credentialKind, &opts.credentialFile)
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
+	}
+	if opts.codexMaxCalls < 0 || opts.claudeMaxCalls < 0 {
+		return options{}, errors.New("max-in-flight limits must not be negative")
 	}
 	if flags.NArg() != 0 {
 		return options{}, errors.New("unexpected positional arguments")
