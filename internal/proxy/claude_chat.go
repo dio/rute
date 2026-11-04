@@ -65,6 +65,8 @@ func (handler *Handler) handleClaudeChatBody(
 	}
 	response, err := handler.claudeUpstream(
 		request.Context(),
+		"chat_completions",
+		publicModel,
 		payload,
 		request.Header,
 		sessionID,

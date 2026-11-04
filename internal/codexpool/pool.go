@@ -26,10 +26,15 @@ const (
 	maxRefreshJitter     = 30 * time.Second
 )
 
-// Lease identifies the selected local account and its upstream token.
+// Lease identifies the selected local account and its upstream token. Every
+// Lease returned by Acquire must be returned with Release.
 type Lease struct {
-	AccountID string
-	Token     codexauth.Token
+	AccountID   string
+	AccountName string
+	// InFlight counts the account's leased calls when this lease was
+	// acquired, including this one.
+	InFlight int
+	Token    codexauth.Token
 }
 
 type account struct {
@@ -39,6 +44,7 @@ type account struct {
 	dirty               bool
 	cooldownUntil       time.Time
 	cooldownRateLimited bool
+	inFlight            int
 }
 
 type sessionBinding struct {
@@ -60,10 +66,40 @@ type Pool struct {
 	authConfig codexauth.Config
 	stderr     io.Writer
 
-	mu       sync.Mutex
-	accounts []*account
-	sessions map[string]sessionBinding
-	rr       int
+	mu          sync.Mutex
+	accounts    []*account
+	sessions    map[string]sessionBinding
+	rr          int
+	maxInFlight int
+	balance     Balance
+	// order ranks account names for the priority and failover modes.
+	order map[string]int
+}
+
+// Balance selects how calls are distributed across a provider's accounts.
+type Balance string
+
+// Balance modes.
+const (
+	// BalanceSpread sends each new session to the account with the fewest
+	// calls in flight.
+	BalanceSpread Balance = "spread"
+	// BalancePriority uses accounts in order, moving to the next account
+	// when one is unusable or at the in-flight limit.
+	BalancePriority Balance = "priority"
+	// BalanceFailover uses accounts in order, moving to the next account
+	// only when one is unusable, such as when it is rate-limited.
+	BalanceFailover Balance = "failover"
+)
+
+// ParseBalance validates a balance mode name.
+func ParseBalance(value string) (Balance, error) {
+	switch mode := Balance(value); mode {
+	case BalanceSpread, BalancePriority, BalanceFailover:
+		return mode, nil
+	}
+	return "", fmt.Errorf("balance must be %s, %s, or %s",
+		BalanceSpread, BalancePriority, BalanceFailover)
 }
 
 // New loads accounts from store. Refresh-only accounts are exchanged lazily
@@ -406,7 +442,16 @@ func (pool *Pool) Acquire(
 		token, err := source.Get(ctx)
 		if err == nil {
 			pool.persistToken(ctx, item, token)
-			return Lease{AccountID: id, Token: token}, nil
+			pool.mu.Lock()
+			item.inFlight++
+			lease := Lease{
+				AccountID:   id,
+				AccountName: item.record.Name,
+				InFlight:    item.inFlight,
+				Token:       token,
+			}
+			pool.mu.Unlock()
+			return lease, nil
 		}
 		localExcluded[id] = struct{}{}
 		if errors.Is(err, codexauth.ErrReauthenticationRequired) {
@@ -418,6 +463,69 @@ func (pool *Pool) Acquire(
 			return Lease{}, ctx.Err()
 		}
 	}
+}
+
+// Release ends a lease returned by Acquire.
+func (pool *Pool) Release(id string) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if item := pool.accountByIDLocked(id); item != nil && item.inFlight > 0 {
+		item.inFlight--
+	}
+}
+
+// SetMaxInFlight sets the per-account number of leased calls above which new
+// and existing sessions move to a less loaded account. Zero disables the
+// limit; new sessions still go to the least loaded account.
+func (pool *Pool) SetMaxInFlight(limit int) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	pool.maxInFlight = max(0, limit)
+}
+
+// SetBalance sets the distribution mode. For the priority and failover
+// modes, names lists accounts from most to least preferred; accounts not
+// named follow in store order, and sessions return to a more preferred
+// account once it is usable again. Every name must belong to a loaded
+// account.
+func (pool *Pool) SetBalance(mode Balance, names []string) error {
+	if _, err := ParseBalance(string(mode)); err != nil {
+		return err
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	order := make(map[string]int, len(names))
+	for index, name := range names {
+		if pool.accountByNameLocked(name) == nil {
+			return fmt.Errorf("codexpool: %s account %q in account order does not exist", pool.provider, name)
+		}
+		if _, duplicate := order[name]; duplicate {
+			return fmt.Errorf("codexpool: account %q appears twice in account order", name)
+		}
+		order[name] = index
+	}
+	pool.balance = mode
+	pool.order = order
+	return nil
+}
+
+// rankLocked returns the priority of the account at index; lower is earlier.
+func (pool *Pool) rankLocked(item *account, index int) int {
+	if rank, ok := pool.order[item.record.Name]; ok {
+		return rank
+	}
+	return len(pool.order) + index
+}
+
+// InFlight returns the leased calls for each account name.
+func (pool *Pool) InFlight() map[string]int {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	counts := make(map[string]int, len(pool.accounts))
+	for _, item := range pool.accounts {
+		counts[item.record.Name] = item.inFlight
+	}
+	return counts
 }
 
 // ForceRefresh refreshes the selected account once.
@@ -442,7 +550,15 @@ func (pool *Pool) ForceRefresh(ctx context.Context, id string) (Lease, error) {
 		return Lease{}, err
 	}
 	pool.persistToken(ctx, item, token)
-	return Lease{AccountID: id, Token: token}, nil
+	pool.mu.Lock()
+	lease := Lease{
+		AccountID:   id,
+		AccountName: item.record.Name,
+		InFlight:    item.inFlight,
+		Token:       token,
+	}
+	pool.mu.Unlock()
+	return lease, nil
 }
 
 // MarkRateLimited cools down an account and unbinds its sessions.
@@ -630,6 +746,17 @@ func (pool *Pool) setCooldownReason(id string, until time.Time, rateLimited bool
 	pool.unbindAccountLocked(id)
 }
 
+// selectAccount picks an account for one call.
+//
+// By default it spreads load: a session stays on its bound account unless
+// that account is at the in-flight limit while another eligible account is
+// below it, and other sessions go to the eligible account with the fewest
+// calls in flight, with ties broken in round-robin order.
+//
+// In priority mode, it takes the most preferred eligible account below the
+// in-flight limit, rebinding the session if needed. When every eligible
+// account is at the limit, it falls back to the spreading rules. In failover
+// mode, it takes the most preferred eligible account regardless of load.
 func (pool *Pool) selectAccount(
 	sessionID string,
 	excluded map[string]struct{},
@@ -638,20 +765,18 @@ func (pool *Pool) selectAccount(
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	pool.cleanupSessionsLocked(now)
-	if binding, ok := pool.sessions[sessionID]; ok {
-		if item := pool.accountByIDLocked(binding.accountID); pool.eligibleLocked(item, now, excluded) {
-			binding.lastUsed = now
-			pool.sessions[sessionID] = binding
-			return item, nil
-		}
-		delete(pool.sessions, sessionID)
-	}
 	if len(pool.accounts) == 0 {
 		return nil, ErrAuthenticationRequired
 	}
-	var earliest time.Time
-	reauthCount := 0
-	rateLimitedCount := 0
+	var (
+		earliest         time.Time
+		reauthCount      int
+		rateLimitedCount int
+		best             *account
+		bestIndex        int
+		preferred        *account
+		preferredRank    int
+	)
 	for offset := range pool.accounts {
 		index := (pool.rr + offset) % len(pool.accounts)
 		item := pool.accounts[index]
@@ -671,14 +796,40 @@ func (pool *Pool) selectAccount(
 		if _, skip := excluded[item.record.ID]; skip {
 			continue
 		}
-		pool.rr = (index + 1) % len(pool.accounts)
-		if sessionID != "" {
-			pool.sessions[sessionID] = sessionBinding{
-				accountID: item.record.ID,
-				lastUsed:  now,
+		if best == nil || item.inFlight < best.inFlight {
+			best = item
+			bestIndex = index
+		}
+		if pool.balance == BalanceFailover ||
+			(pool.balance == BalancePriority &&
+				(pool.maxInFlight == 0 || item.inFlight < pool.maxInFlight)) {
+			if rank := pool.rankLocked(item, index); preferred == nil || rank < preferredRank {
+				preferred = item
+				preferredRank = rank
 			}
 		}
-		return item, nil
+	}
+	if preferred != nil {
+		pool.bindLocked(sessionID, preferred, now)
+		return preferred, nil
+	}
+	if binding, ok := pool.sessions[sessionID]; ok {
+		item := pool.accountByIDLocked(binding.accountID)
+		if pool.eligibleLocked(item, now, excluded) &&
+			(pool.maxInFlight == 0 ||
+				item.inFlight < pool.maxInFlight ||
+				best == nil ||
+				best.inFlight >= pool.maxInFlight) {
+			binding.lastUsed = now
+			pool.sessions[sessionID] = binding
+			return item, nil
+		}
+		delete(pool.sessions, sessionID)
+	}
+	if best != nil {
+		pool.rr = (bestIndex + 1) % len(pool.accounts)
+		pool.bindLocked(sessionID, best, now)
+		return best, nil
 	}
 	if reauthCount == len(pool.accounts) {
 		return nil, ErrAuthenticationRequired
@@ -686,6 +837,15 @@ func (pool *Pool) selectAccount(
 	return nil, &UnavailableError{
 		RetryAt:     earliest,
 		RateLimited: rateLimitedCount > 0 && rateLimitedCount+reauthCount == len(pool.accounts),
+	}
+}
+
+func (pool *Pool) bindLocked(sessionID string, item *account, now time.Time) {
+	if sessionID != "" {
+		pool.sessions[sessionID] = sessionBinding{
+			accountID: item.record.ID,
+			lastUsed:  now,
+		}
 	}
 }
 

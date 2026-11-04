@@ -30,6 +30,15 @@ brew upgrade rute
 
 ## Local proxy
 
+> [!IMPORTANT]
+> Use the provider's own client with subscription accounts: Claude Code (CLI
+> or app) for Claude, and the Codex CLI or app for Codex. Claude subscription
+> accounts reject requests from other clients, including `curl`, OpenWorker,
+> and the Chat Completions adapter, with a bare `429`. rute passes that error
+> through without cooling down the account. Point Claude Code at rute with
+> `ANTHROPIC_BASE_URL=http://127.0.0.1:20128`, and Codex with the provider
+> configuration in [Codex CLI](#codex-cli).
+
 Start the proxy:
 
 ```sh
@@ -207,15 +216,30 @@ chain hashes—never OAuth tokens, authorization codes, PKCE verifiers, or token
 fingerprints. See [docs/credentials.md](docs/credentials.md#audit-credential-changes)
 for its guarantees and limitations.
 
-New sessions rotate across healthy accounts and remain pinned to their chosen
-account. An account that needs login or is temporarily rate-limited is excluded
-until it recovers. Only authorization and quota failures fail over to another
-account; upstream `5xx` responses are not replayed.
+Each new session goes to the healthy account with the fewest calls in flight,
+and later requests in that session stay on the same account. An account that
+needs login or is temporarily rate-limited is excluded until it recovers. Only
+authorization and quota failures fail over to another account; upstream `5xx`
+responses are not replayed. See
+[Balancing several subscriptions](#balancing-several-subscriptions) for
+per-account concurrency limits.
 
-When every usable Claude account is rate-limited, both `/v1/messages` and
-Claude requests to `/v1/chat/completions` return HTTP `429` with
-`error.type: rate_limit_error` and a `Retry-After` header. Requests during the
-cooldown return the same status without contacting Claude again. The retry
+When every usable account of a provider is rate-limited, requests for that
+provider return HTTP `429` with `error.type: rate_limit_error` and a
+`Retry-After` header. The Responses WebSocket sends an `error` event of type
+`rate_limit_error` instead. Requests during the cooldown return the same
+status without contacting the upstream again.
+
+Claude marks account quota rejections with `Retry-After` or
+`anthropic-ratelimit-*` headers. A Claude `429` without either header rejects
+that request rather than the account, so rute returns it unchanged and does not
+cool down the account or try another one. Claude subscription accounts answer
+this way to requests that do not come from Claude Code, for example plain
+`curl` calls.
+
+rute logs one stderr line per upstream quota rejection: the account name, the upstream error type and message, and the
+rate-limit headers, such as which window (`5h` or `7d`) was exhausted and when
+it resets. The retry
 interval is the proxy's earliest account cooldown, not a guarantee that the
 upstream quota will have reset. If the upstream supplies no reset hint, rute
 uses a one-minute cooldown. Authentication or other availability failures
@@ -233,6 +257,132 @@ rute
 Each login prints a provider authorization URL and waits for its loopback
 callback. Refresh tokens are stored under separate `rute/codex` and
 `rute/claude` keyring services.
+
+### Balancing several subscriptions
+
+Subscription accounts slow down sharply as the number of concurrent calls on
+one account grows: time to first token rises and output speed falls, while the
+account's total throughput stays roughly flat. Spreading the same load across
+more accounts keeps each account in its fast range.
+
+Add every subscription as its own account:
+
+```sh
+rute account add -provider=claude -name default
+rute account add -provider=claude -name personal
+rute account add -provider=codex -name codex-a
+rute account add -provider=codex -name codex-b
+```
+
+`-claude-balance` and `-codex-balance` choose how calls use those accounts.
+In every mode, an account that is rate-limited or needs login is skipped until
+it recovers, and the call goes to the next usable account without the client
+seeing the failure.
+
+| Mode | Where a call goes |
+| --- | --- |
+| `spread` (default) | New sessions go to the account with the fewest calls in flight. |
+| `priority` | The first account in the order with fewer calls in flight than `-*-max-in-flight`. |
+| `failover` | The first usable account in the order, however busy it is. |
+
+`-claude-account-order` and `-codex-account-order` list account names from
+most to least preferred for `priority` and `failover`. Accounts not listed
+follow in the order they were added.
+
+Spread load across equal subscriptions, keeping each one in its fast range:
+
+```sh
+rute serve -claude-balance=spread -claude-max-in-flight=6
+```
+
+Use a team plan first and a personal plan only for overflow:
+
+```sh
+rute serve -claude-balance=priority -claude-account-order=default,personal \
+  -claude-max-in-flight=6
+```
+
+Use the personal plan only while the team plan is rate-limited:
+
+```sh
+rute serve -claude-balance=failover -claude-account-order=default,personal
+```
+
+Later requests in a session stay on one account, which keeps that account's
+prompt cache warm. Send a stable `X-Session-ID` header per agent run when the
+client supports it. A session moves to another account in these cases:
+
+- its account becomes rate-limited or unusable;
+- in `spread` and `priority`, its account reaches `-*-max-in-flight` while
+  another account is below the limit; or
+- in `priority` and `failover`, a more preferred account becomes usable
+  again, for example after a quota reset.
+
+Moving a session costs one uncached request on the new account. When every
+account is at the limit, calls go to the least loaded account; rute does not
+queue or reject them. `priority` requires a `-*-max-in-flight` limit.
+
+The limits above are a starting point from one set of agent benchmarks.
+Measure your own with the tools below.
+
+### Measuring latency under concurrency
+
+`-metrics-file` appends one JSON line per inference call. A line contains the
+provider, endpoint, model, account name, calls in flight on that account when
+the call started, status, outcome, time to first token (`wait_ms`), duration,
+output tokens, and output tokens per second after the first token. It never
+contains prompts, outputs, or credentials.
+
+```sh
+rute serve -metrics-file="$HOME/Library/Logs/rute/calls.jsonl"
+```
+
+`rute stats` groups those lines by calls in flight:
+
+```sh
+rute stats -by=provider,account "$HOME/Library/Logs/rute/calls.jsonl"
+```
+
+Each row is one group and in-flight range, with these columns:
+
+```text
+GROUP  IN FLIGHT  CALLS  OK  429  CANCEL  ERROR  WAIT P50  WAIT P90  TOK/S P50  MEAN CALL
+```
+
+`-buckets` sets the in-flight ranges (default `1,3,6,12,24,48`).
+
+`CANCEL` counts calls that the client abandoned, which is how a benchmark
+harness's per-task timeout appears. Check it next to the pass rate: a high
+cancel rate means the run measured rate limiting rather than the model.
+
+`rute bench` generates the load itself. Each worker makes `-rounds`
+sequential calls in its own session, and each `-concurrency` level runs after
+the previous one finishes:
+
+```sh
+rute bench -api=messages -model=claude-sonnet-5 -concurrency=1,3,6,12 -rounds=3
+rute bench -api=responses-ws -model=gpt-5.6-sol -concurrency=1,6,12 -effort=low
+```
+
+`-api` is `messages`, `chat`, `responses`, or `responses-ws`. The summary
+table adds `TOTAL TOK/S`, the output tokens per second across all workers at
+that level. Use `-output=FILE` to keep the per-call lines for `rute stats`.
+
+`rute bench` sends plain API requests. Claude subscription accounts reject
+those, so for Claude subscriptions, run your Claude Code workload with
+`ANTHROPIC_BASE_URL=http://127.0.0.1:20128` and summarize `-metrics-file`
+with `rute stats` instead. `rute bench` works for Codex subscriptions and for
+the provider APIs.
+
+To compare with the provider API, point the same command at the API and pass
+the key through an environment variable:
+
+```sh
+rute bench -url=https://api.anthropic.com -api-key-env=ANTHROPIC_API_KEY \
+  -api=messages -model=claude-sonnet-5 -concurrency=1,3,6,12
+```
+
+Benchmark load uses the same subscription quota as other work.
 
 ### Model routing
 
@@ -277,6 +427,10 @@ required; `provider` must be `codex` or `claude`. Configured aliases are
 returned by `/v1/models` and take precedence over namespace routing.
 
 ### HTTP examples
+
+These examples show the request formats. With Claude subscription accounts,
+the Claude requests below are rejected because they do not come from Claude
+Code; see the notice at the top of this section.
 
 ```sh
 curl http://127.0.0.1:20128/v1/responses \
@@ -329,8 +483,9 @@ needed for each turn.
 
 ### OpenWorker
 
-[OpenWorker](https://github.com/andrewyng/openworker) can use rute through its
-OpenAI-compatible Chat Completions client:
+[OpenWorker](https://github.com/andrewyng/openworker) can use rute's Codex
+accounts through its OpenAI-compatible Chat Completions client. Claude
+subscription accounts reject its requests.
 
 1. Start rute and complete the first OAuth login.
 2. In OpenWorker, choose **OpenAI**.
@@ -342,6 +497,20 @@ OpenWorker requires a non-empty key to construct its SDK client, but rute
 ignores downstream authorization on its loopback listener and substitutes the
 selected account's upstream OAuth access token. Do not expose this listener
 outside the local machine.
+
+### Claude Code
+
+Point Claude Code (CLI or app) at rute:
+
+```sh
+ANTHROPIC_BASE_URL=http://127.0.0.1:20128 claude
+```
+
+Claude Code sends its own requests. rute forwards their body and `anthropic-*`
+and `x-claude-code-*` headers unchanged, replaces only the credential with the
+selected account's token, and moves to another account when one is
+rate-limited. The Claude Agent SDK runs Claude Code, so the same variable works
+for it.
 
 ### Codex CLI
 
