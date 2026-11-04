@@ -11,12 +11,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/bench"
 	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/latency"
+	"github.com/dio/rute/internal/pricing"
 )
 
 const defaultBenchPrompt = "Write about 300 words explaining how a hash map handles collisions."
@@ -158,6 +160,8 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		by       string
 		database string
 		window   time.Duration
+		usage    string
+		prices   string
 	)
 	flags := flag.NewFlagSet("rute stats", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -168,6 +172,10 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&database, "metrics-db", "",
 		"call history database to read when no JSONL files are given (default: metrics.db in the state directory)")
 	flags.DurationVar(&window, "window", 24*time.Hour, "how far back to read from the database")
+	flags.StringVar(&usage, "usage", "",
+		"print token usage and estimated cost from the database by hour, day, or total")
+	flags.StringVar(&prices, "prices", "",
+		"JSON price list for -usage (default: prices.json in the state directory)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -184,13 +192,21 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	var records []latency.Record
-	if flags.NArg() == 0 {
-		if database == "" {
+	if flags.NArg() == 0 || usage != "" {
+		if flags.NArg() != 0 {
+			return errors.New("-usage reads the database; do not pass JSONL files")
+		}
+		if database == "" || prices == "" {
 			dir, err := accountstore.DefaultStateDir()
 			if err != nil {
 				return err
 			}
-			database = filepath.Join(dir, "metrics.db")
+			if database == "" {
+				database = filepath.Join(dir, "metrics.db")
+			}
+			if prices == "" {
+				prices = filepath.Join(dir, "prices.json")
+			}
 		}
 		if _, err := os.Stat(database); err != nil {
 			return fmt.Errorf("no JSONL files given and no call history at %s", database)
@@ -198,6 +214,10 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		calls, err := callstore.Open(database)
 		if err != nil {
 			return err
+		}
+		if usage != "" {
+			defer func() { _ = calls.Close() }()
+			return writeUsage(stdout, calls, pricing.NewFile(prices), time.Now().Add(-window), usage)
 		}
 		counters, err := calls.Summary(context.Background(), time.Now().Add(-window))
 		_ = calls.Close()
@@ -252,4 +272,45 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		return strings.Join(parts, "/")
 	})
 	return latency.WriteTable(stdout, rows, "IN FLIGHT", false)
+}
+
+// writeUsage prints token usage per period, account, and model with the
+// estimated API-equivalent cost of each row.
+func writeUsage(stdout io.Writer, calls *callstore.Store, prices *pricing.File, since time.Time, by string) error {
+	steps := map[string]time.Duration{"hour": time.Hour, "day": 24 * time.Hour, "total": 0}
+	step, ok := steps[by]
+	if !ok {
+		return errors.New("-usage must be hour, day, or total")
+	}
+	table, err := prices.Table()
+	if err != nil {
+		return err
+	}
+	rows, err := calls.Usage(context.Background(), since.In(time.Local), step)
+	if err != nil {
+		return err
+	}
+	writer := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
+	_, _ = fmt.Fprintln(writer, "PERIOD\tACCOUNT\tMODEL\tCALLS\tINPUT\tOUTPUT\tCACHE READ\tCACHE WRITE\tEST. COST\t")
+	var total float64
+	for _, row := range rows {
+		period := "total"
+		if !row.Start.IsZero() {
+			period = row.Start.Local().Format("2006-01-02 15:04")
+		}
+		cost := "-"
+		if rate, ok := table.Lookup(row.Model); ok {
+			value := rate.Cost(pricing.Tokens{Input: row.InputTokens, Output: row.OutputTokens,
+				CacheRead: row.CacheReadTokens, CacheWrite: row.CacheWriteTokens})
+			total += value
+			cost = fmt.Sprintf("$%.2f", value)
+		}
+		_, _ = fmt.Fprintf(writer, "%s\t%s/%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t\n", period, row.Provider, row.Account,
+			row.Model, row.Calls, row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens, cost)
+	}
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "estimated API-equivalent cost of priced models: $%.2f (from %s)\n", total, prices.Path())
+	return err
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/callstore"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/pricing"
 )
 
 const (
@@ -53,6 +54,8 @@ type Config struct {
 	Pools map[string]*codexpool.Pool
 	// Calls, when set, provides call history.
 	Calls *callstore.Store
+	// Prices, when set, estimates usage costs.
+	Prices *pricing.File
 	// StartSession begins account logins. It defaults to StartOAuthSession.
 	StartSession SessionStarter
 	LoginTimeout time.Duration
@@ -101,6 +104,7 @@ func New(config Config) (*Server, error) {
 	}
 	server.mux.HandleFunc("GET /{$}", server.handleDashboard)
 	server.mux.HandleFunc("GET /accounts/new", server.handleNewAccount)
+	server.mux.HandleFunc("GET /usage", server.handleUsagePage)
 	server.mux.HandleFunc("POST /accounts", server.handleAccountForm)
 	server.mux.HandleFunc("GET /logins/{id}", server.handleLoginPage)
 	server.mux.HandleFunc("GET /providers/{provider}/routing", server.handleRoutingPage)
@@ -108,6 +112,7 @@ func New(config Config) (*Server, error) {
 	server.mux.HandleFunc("GET /v1/status", server.handleStatus)
 	server.mux.HandleFunc("GET /v1/calls/summary", server.handleSummary)
 	server.mux.HandleFunc("GET /v1/calls/recent", server.handleRecent)
+	server.mux.HandleFunc("GET /v1/usage", server.handleUsageAPI)
 	server.mux.HandleFunc("POST /v1/logins", server.handleLoginAPI)
 	server.mux.HandleFunc("GET /v1/logins/{id}", server.handleLoginStatus)
 	server.mux.HandleFunc("PUT /v1/providers/{provider}/routing", server.handleRoutingAPI)

@@ -7,6 +7,7 @@
   <b>rute</b>
   <span class="muted">version {{.Version}} · running for {{.Uptime}}</span>
   {{range .Providers}}<span>{{.Name}}: {{.Summary}}</span>{{end}}
+  <a href="/usage">usage</a>
   <nav class="right">refresh {{range .Refreshes}}<a href="/?window={{$.Window}}&amp;refresh={{.Name}}"{{if eq .Name $.Refresh.Name}} class="on"{{end}}>{{.Name}}</a>{{end}}</nav>
 </header>
 

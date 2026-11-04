@@ -1,0 +1,35 @@
+{{template "head"}}
+<title>rute · usage</title>
+</head>
+<body>
+<header>
+  <b><a href="/">rute</a></b><span>usage since {{.Since}}</span>
+  <nav>{{range .Windows}}<a href="/usage?window={{.}}"{{if eq . $.Window}} class="on"{{end}}>{{.}}</a>{{end}}</nav>
+  <nav class="right">by {{range .Groupings}}<a href="/usage?window={{$.Window}}&amp;by={{.}}"{{if eq . $.By}} class="on"{{end}}>{{.}}</a>{{end}}</nav>
+</header>
+{{if .Error}}<p class="attention">{{.Error}}</p>{{else}}
+
+<h2>By account and model</h2>
+<div class="scroll"><table>
+  <tr><th>account</th><th>model</th><th class="n">calls</th><th class="n">429</th><th class="n">input</th><th class="n">output</th><th class="n">cache read</th><th class="n">cache write</th><th class="n">est. cost</th></tr>
+  {{range .ByModel}}
+  <tr{{if .Total}} class="attention"{{end}}><td>{{.Account}}</td><td>{{.Model}}</td><td class="n">{{.Calls}}</td><td class="n">{{.Limited}}</td><td class="n">{{.Input}}</td><td class="n">{{.Output}}</td><td class="n">{{.CacheRead}}</td><td class="n">{{.CacheWrite}}</td><td class="n">{{.Cost}}</td></tr>
+  {{else}}<tr><td colspan="9" class="muted">no calls in the last {{.Window}}</td></tr>{{end}}
+</table></div>
+
+{{if .ByPeriod}}
+<h2>By {{.By}}</h2>
+<div class="scroll"><table>
+  <tr><th>{{.By}}</th><th>account</th><th class="n">calls</th><th class="n">429</th><th class="n">input</th><th class="n">output</th><th class="n">cache read</th><th class="n">cache write</th><th class="n">est. cost</th></tr>
+  {{range .ByPeriod}}
+  <tr><td>{{.Period}}</td><td>{{.Account}}</td><td class="n">{{.Calls}}</td><td class="n">{{.Limited}}</td><td class="n">{{.Input}}</td><td class="n">{{.Output}}</td><td class="n">{{.CacheRead}}</td><td class="n">{{.CacheWrite}}</td><td class="n">{{.Cost}}</td></tr>
+  {{end}}
+</table></div>
+{{end}}
+
+<p class="muted">Input excludes cache reads. Est. cost is the API-equivalent price of these tokens from {{if .PricesPath}}{{.PricesPath}}{{else}}a prices file{{end}}; subscriptions are not billed per token.
+{{if .Unpriced}}No price for: {{join .Unpriced ", "}}.{{end}}</p>
+{{if .PricesErr}}<p class="attention">prices file: {{.PricesErr}}</p>{{end}}
+{{end}}
+</body>
+</html>

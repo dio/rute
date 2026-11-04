@@ -27,8 +27,10 @@ type Observer struct {
 	firstByte  time.Time
 	firstToken time.Time
 	tokens     int64
-	completed  bool
-	failed     bool
+	// Input token fields as reported, each the largest value seen.
+	input, cached, cacheWrite, cacheRead int64
+	completed                            bool
+	failed                               bool
 }
 
 // NewObserver returns an Observer that reads the wall clock.
@@ -116,6 +118,19 @@ func (observer *Observer) line(line []byte, now time.Time) {
 type usage struct {
 	OutputTokens     *int64 `json:"output_tokens"`
 	CompletionTokens *int64 `json:"completion_tokens"`
+	// Claude reports input without cached tokens, and cache reads and writes
+	// separately.
+	InputTokens              *int64 `json:"input_tokens"`
+	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+	// OpenAI APIs report input including cached tokens.
+	PromptTokens       *int64        `json:"prompt_tokens"`
+	InputTokensDetails *tokenDetails `json:"input_tokens_details"`
+	PromptTokenDetails *tokenDetails `json:"prompt_tokens_details"`
+}
+
+type tokenDetails struct {
+	CachedTokens *int64 `json:"cached_tokens"`
 }
 
 type event struct {
@@ -206,10 +221,40 @@ func (observer *Observer) usage(value *usage) {
 	if value == nil {
 		return
 	}
-	for _, count := range []*int64{value.OutputTokens, value.CompletionTokens} {
-		if count != nil && *count > observer.tokens {
-			observer.tokens = *count
+	raise := func(target *int64, counts ...*int64) {
+		for _, count := range counts {
+			if count != nil && *count > *target {
+				*target = *count
+			}
 		}
+	}
+	raise(&observer.tokens, value.OutputTokens, value.CompletionTokens)
+	raise(&observer.input, value.InputTokens, value.PromptTokens)
+	raise(&observer.cacheWrite, value.CacheCreationInputTokens)
+	raise(&observer.cacheRead, value.CacheReadInputTokens)
+	for _, details := range []*tokenDetails{value.InputTokensDetails, value.PromptTokenDetails} {
+		if details != nil {
+			raise(&observer.cached, details.CachedTokens)
+		}
+	}
+}
+
+// Usage is the token usage of one call. InputTokens excludes cached tokens,
+// so each field can be priced separately.
+type Usage struct {
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+}
+
+// Usage returns the token usage reported upstream.
+func (observer *Observer) Usage() Usage {
+	return Usage{
+		InputTokens:      max(0, observer.input-observer.cached),
+		OutputTokens:     observer.tokens,
+		CacheReadTokens:  max(observer.cacheRead, observer.cached),
+		CacheWriteTokens: observer.cacheWrite,
 	}
 }
 

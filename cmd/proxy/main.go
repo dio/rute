@@ -28,6 +28,7 @@ import (
 	"github.com/dio/rute/internal/codexpool"
 	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/internal/modelcatalog"
+	"github.com/dio/rute/internal/pricing"
 	"github.com/dio/rute/internal/proxy"
 	"github.com/dio/rute/oauthpkce"
 	"github.com/dio/rute/providers/claude"
@@ -59,6 +60,7 @@ type options struct {
 	modelsFile     string
 	metricsFile    string
 	metricsDB      string
+	prices         string
 	retention      time.Duration
 	adminListen    string
 	codexMaxCalls  int
@@ -330,6 +332,7 @@ func runServe(
 			Started:      time.Now(),
 			Pools:        pools,
 			Calls:        calls,
+			Prices:       pricing.NewFile(opts.prices),
 			LoginTimeout: opts.loginTimeout,
 		})
 		if err != nil {
@@ -660,6 +663,12 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		"",
 		`SQLite per-minute call counters for the dashboard (default: metrics.db in the state directory), or "off"`,
 	)
+	flags.StringVar(
+		&opts.prices,
+		"prices",
+		"",
+		"JSON price list for estimated usage costs (default: prices.json in the state directory)",
+	)
 	flags.DurationVar(
 		&opts.retention,
 		"metrics-retention",
@@ -714,12 +723,17 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	if opts.retention <= 0 {
 		return options{}, errors.New("metrics-retention must be positive")
 	}
-	if opts.metricsDB == "" {
+	if opts.metricsDB == "" || opts.prices == "" {
 		dir, err := accountstore.DefaultStateDir()
 		if err != nil {
 			return options{}, err
 		}
-		opts.metricsDB = filepath.Join(dir, "metrics.db")
+		if opts.metricsDB == "" {
+			opts.metricsDB = filepath.Join(dir, "metrics.db")
+		}
+		if opts.prices == "" {
+			opts.prices = filepath.Join(dir, "prices.json")
+		}
 	}
 	if opts.codexMaxCalls < 0 || opts.claudeMaxCalls < 0 {
 		return options{}, errors.New("max-in-flight limits must not be negative")

@@ -187,3 +187,43 @@ func TestFillSkipsRateForBurstReply(t *testing.T) {
 		t.Errorf("record = %+v", record)
 	}
 }
+
+func TestObserverUsage(t *testing.T) {
+	t.Parallel()
+	for name, test := range map[string]struct {
+		events []string
+		want   Usage
+	}{
+		"claude messages": {
+			events: []string{
+				`{"type":"message_start","message":{"usage":{"input_tokens":12,"cache_creation_input_tokens":3000,"cache_read_input_tokens":9000,"output_tokens":1}}}`,
+				`{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`,
+				`{"type":"message_delta","usage":{"output_tokens":250}}`,
+				`{"type":"message_stop"}`,
+			},
+			want: Usage{InputTokens: 12, OutputTokens: 250, CacheReadTokens: 9000, CacheWriteTokens: 3000},
+		},
+		"codex responses": {
+			events: []string{
+				`{"type":"response.output_text.delta","delta":"hi"}`,
+				`{"type":"response.completed","response":{"usage":{"input_tokens":5000,"input_tokens_details":{"cached_tokens":4096},"output_tokens":300}}}`,
+			},
+			want: Usage{InputTokens: 904, OutputTokens: 300, CacheReadTokens: 4096},
+		},
+		"chat completions": {
+			events: []string{
+				`{"choices":[{"delta":{"content":"hi"}}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":800,"prompt_tokens_details":{"cached_tokens":500},"completion_tokens":40}}`,
+			},
+			want: Usage{InputTokens: 300, OutputTokens: 40, CacheReadTokens: 500},
+		},
+	} {
+		observer := NewObserver()
+		for _, data := range test.events {
+			observer.Event([]byte(data), time.Now())
+		}
+		if got := observer.Usage(); got != test.want {
+			t.Errorf("%s: usage = %+v, want %+v", name, got, test.want)
+		}
+	}
+}

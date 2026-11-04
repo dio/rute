@@ -44,6 +44,10 @@ type Record struct {
 	WaitMS       float64 `json:"wait_ms,omitempty"`
 	DurationMS   float64 `json:"duration_ms"`
 	OutputTokens int64   `json:"output_tokens,omitempty"`
+	// InputTokens excludes cached input, which is counted in CacheReadTokens.
+	InputTokens      int64 `json:"input_tokens,omitempty"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 	// TokensPerSecond is output tokens divided by the time from the first
 	// token to the end of the stream.
 	TokensPerSecond float64 `json:"tokens_per_second,omitempty"`
@@ -55,7 +59,11 @@ func (record *Record) Fill(start, end time.Time, observer *Observer) {
 	if observer == nil {
 		return
 	}
-	record.OutputTokens = observer.OutputTokens()
+	usage := observer.Usage()
+	record.OutputTokens = usage.OutputTokens
+	record.InputTokens = usage.InputTokens
+	record.CacheReadTokens = usage.CacheReadTokens
+	record.CacheWriteTokens = usage.CacheWriteTokens
 	first := observer.FirstToken()
 	if first.IsZero() {
 		return

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
 	"github.com/dio/rute/internal/latency"
+	"github.com/dio/rute/internal/pricing"
 	"github.com/dio/rute/oauthpkce"
 )
 
@@ -376,5 +378,56 @@ func TestRoutingFormChangesRunningPool(t *testing.T) {
 	}
 	if status := fixture.pool.Status(); status.Balance != codexpool.BalanceSpread || status.MaxInFlight != 0 || len(status.Order) != 0 {
 		t.Errorf("status after form = %+v", status)
+	}
+}
+
+func TestUsageReportsTokensAndEstimatedCost(t *testing.T) {
+	t.Parallel()
+	fixture := newFixture(t)
+	prices := filepath.Join(t.TempDir(), "prices.json")
+	if err := os.WriteFile(prices, []byte(`{"models":{"claude-test-*":{"input":2,"output":10,"cache_read":0.5,"cache_write":4}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.server.config.Prices = pricing.NewFile(prices)
+	now := time.Now()
+	for _, record := range []latency.Record{
+		{Time: now.Add(-2 * time.Hour), Provider: "claude", Account: "default", Model: "claude-test-1",
+			Outcome: latency.OutcomeOK, InputTokens: 1_000_000, OutputTokens: 100_000,
+			CacheReadTokens: 2_000_000, CacheWriteTokens: 250_000},
+		{Time: now, Provider: "claude", Account: "personal", Model: "unlisted", Outcome: latency.OutcomeOK,
+			InputTokens: 10, OutputTokens: 20},
+	} {
+		_ = fixture.calls.Write(record)
+	}
+
+	recorder := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/v1/usage?window=24h&by=total", nil))
+	var response struct {
+		Rows     []UsageRow `json:"rows"`
+		Unpriced []string   `json:"unpriced_models"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("usage JSON: %v\n%s", err, recorder.Body)
+	}
+	if len(response.Rows) != 2 || response.Rows[0].CostUSD == nil || *response.Rows[0].CostUSD != 2+1+1+1 ||
+		response.Rows[1].CostUSD != nil || strings.Join(response.Unpriced, ",") != "unlisted" {
+		t.Fatalf("usage = %s", recorder.Body)
+	}
+	if response.Rows[0].Start != nil {
+		t.Error("total rows have a start time")
+	}
+
+	hourly := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/v1/usage?window=24h", nil))
+	if err := json.Unmarshal(hourly.Body.Bytes(), &response); err != nil || len(response.Rows) != 2 || response.Rows[0].Start == nil {
+		t.Errorf("hourly usage = %s", hourly.Body)
+	}
+	if got := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/v1/usage?window=1y", nil)).Code; got != http.StatusBadRequest {
+		t.Errorf("bad window = %d, want 400", got)
+	}
+
+	page := fixture.do(t, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:20129/usage?window=24h", nil)).Body.String()
+	for _, want := range []string{"claude/default", "claude-test-1", "1.00M", "2.00M", "250.0k", "$5.00", "No price for: unlisted", "By hour"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("usage page missing %q", want)
+		}
 	}
 }

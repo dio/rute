@@ -171,3 +171,65 @@ func TestHistogramQuantile(t *testing.T) {
 		t.Error("empty histogram quantile is not NaN")
 	}
 }
+
+func TestUsageGroupsByPeriodAccountAndModel(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	zone := time.FixedZone("UTC+7", 7*3600)
+	day := time.Date(2026, 11, 3, 0, 0, 0, 0, zone)
+	call := func(at time.Time, account, model string, input, output, read, write int64) latency.Record {
+		return latency.Record{Time: at, Provider: "claude", Account: account, Model: model, InFlight: 1,
+			Outcome: latency.OutcomeOK, InputTokens: input, OutputTokens: output,
+			CacheReadTokens: read, CacheWriteTokens: write}
+	}
+	for _, record := range []latency.Record{
+		call(day.Add(9*time.Hour+5*time.Minute), "default", "opus", 10, 100, 1000, 50),
+		call(day.Add(9*time.Hour+40*time.Minute), "default", "opus", 20, 200, 2000, 0),
+		call(day.Add(9*time.Hour+41*time.Minute), "default", "haiku", 1, 2, 3, 4),
+		call(day.Add(23*time.Hour), "personal", "opus", 5, 5, 5, 5),
+	} {
+		_ = store.Write(record)
+	}
+	if err := store.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// An unflushed call in the same hour merges with stored counters.
+	_ = store.Write(call(day.Add(9*time.Hour+50*time.Minute), "default", "opus", 1, 1, 1, 1))
+
+	hourly, err := store.Usage(ctx, day, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hourly) != 3 {
+		t.Fatalf("hourly rows = %d, want 3: %+v", len(hourly), hourly)
+	}
+	opus := hourly[1]
+	if !opus.Start.Equal(day.Add(9*time.Hour)) || opus.Model != "opus" || opus.Calls != 3 ||
+		opus.InputTokens != 31 || opus.OutputTokens != 301 || opus.CacheReadTokens != 3001 || opus.CacheWriteTokens != 51 {
+		t.Errorf("09:00 opus row = %+v", opus)
+	}
+	if hourly[0].Model != "haiku" || hourly[2].Account != "personal" {
+		t.Errorf("hourly order = %s/%s, %s/%s", hourly[0].Account, hourly[0].Model, hourly[2].Account, hourly[2].Model)
+	}
+
+	daily, err := store.Usage(ctx, day, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(daily) != 3 || !daily[0].Start.Equal(day) {
+		t.Errorf("daily rows start at local midnight: %+v", daily)
+	}
+
+	totals, err := store.Usage(ctx, day, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(totals) != 3 || !totals[0].Start.IsZero() {
+		t.Errorf("totals = %+v", totals)
+	}
+}

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS minutes (
 	minute        INTEGER NOT NULL,
 	provider      TEXT    NOT NULL,
 	account       TEXT    NOT NULL,
+	model         TEXT    NOT NULL,
 	bucket        INTEGER NOT NULL,
 	calls         INTEGER NOT NULL,
 	ok            INTEGER NOT NULL,
@@ -51,36 +52,48 @@ CREATE TABLE IF NOT EXISTS minutes (
 	errors        INTEGER NOT NULL,
 	failovers     INTEGER NOT NULL,
 	output_tokens INTEGER NOT NULL,
+	input_tokens  INTEGER NOT NULL,
+	cache_read    INTEGER NOT NULL,
+	cache_write   INTEGER NOT NULL,
 	duration_ms   REAL    NOT NULL,
 	wait_hist     TEXT    NOT NULL,
 	rate_hist     TEXT    NOT NULL,
-	PRIMARY KEY (minute, provider, account, bucket)
+	PRIMARY KEY (minute, provider, account, model, bucket)
 ) WITHOUT ROWID;
 `
 
-// Counters aggregates calls for one provider, account, and calls-in-flight
-// range.
+// Counters aggregates calls for one provider, account, model, and
+// calls-in-flight range. Fields a query merges across are left empty.
 type Counters struct {
-	Provider     string     `json:"provider"`
-	Account      string     `json:"account"`
-	InFlight     string     `json:"in_flight"`
-	Bucket       int        `json:"-"`
-	Calls        int64      `json:"calls"`
-	OK           int64      `json:"ok"`
-	RateLimited  int64      `json:"rate_limited"`
-	Canceled     int64      `json:"canceled"`
-	Errors       int64      `json:"errors"`
-	Failovers    int64      `json:"failovers"`
-	OutputTokens int64      `json:"output_tokens"`
-	DurationMS   float64    `json:"-"`
-	Wait         *Histogram `json:"-"`
-	Rate         *Histogram `json:"-"`
+	// Start is the start of the period the counters cover, when grouped by
+	// time.
+	Start        time.Time `json:"start,omitzero"`
+	Provider     string    `json:"provider"`
+	Account      string    `json:"account"`
+	Model        string    `json:"model,omitempty"`
+	InFlight     string    `json:"in_flight,omitempty"`
+	Bucket       int       `json:"-"`
+	Calls        int64     `json:"calls"`
+	OK           int64     `json:"ok"`
+	RateLimited  int64     `json:"rate_limited"`
+	Canceled     int64     `json:"canceled"`
+	Errors       int64     `json:"errors"`
+	Failovers    int64     `json:"failovers"`
+	OutputTokens int64     `json:"output_tokens"`
+	// InputTokens excludes cached input.
+	InputTokens      int64      `json:"input_tokens"`
+	CacheReadTokens  int64      `json:"cache_read_tokens"`
+	CacheWriteTokens int64      `json:"cache_write_tokens"`
+	DurationMS       float64    `json:"-"`
+	Wait             *Histogram `json:"-"`
+	Rate             *Histogram `json:"-"`
 }
 
 type key struct {
 	minute   int64
 	provider string
 	account  string
+	model    string
 	bucket   int
 }
 
@@ -94,12 +107,13 @@ func bucketLabel(bucket int) string {
 	return label
 }
 
-func newCounters(provider, account string, bucket int) *Counters {
+func newCounters(id key) *Counters {
 	return &Counters{
-		Provider: provider,
-		Account:  account,
-		InFlight: bucketLabel(bucket),
-		Bucket:   bucket,
+		Provider: id.provider,
+		Account:  id.account,
+		Model:    id.model,
+		Bucket:   id.bucket,
+		InFlight: bucketLabel(id.bucket),
 		Wait:     newHistogram(waitBounds),
 		Rate:     newHistogram(rateBounds),
 	}
@@ -121,6 +135,9 @@ func (counters *Counters) add(record latency.Record) {
 		counters.Failovers++
 	}
 	counters.OutputTokens += record.OutputTokens
+	counters.InputTokens += record.InputTokens
+	counters.CacheReadTokens += record.CacheReadTokens
+	counters.CacheWriteTokens += record.CacheWriteTokens
 	counters.DurationMS += record.DurationMS
 	if record.WaitMS > 0 {
 		counters.Wait.observe(waitBounds, record.WaitMS)
@@ -138,6 +155,9 @@ func (counters *Counters) merge(other *Counters) {
 	counters.Errors += other.Errors
 	counters.Failovers += other.Failovers
 	counters.OutputTokens += other.OutputTokens
+	counters.InputTokens += other.InputTokens
+	counters.CacheReadTokens += other.CacheReadTokens
+	counters.CacheWriteTokens += other.CacheWriteTokens
 	counters.DurationMS += other.DurationMS
 	counters.Wait.merge(other.Wait)
 	counters.Rate.merge(other.Rate)
@@ -151,7 +171,7 @@ func ByAccount(counters []*Counters) map[string]*Counters {
 		id := item.Provider + "/" + item.Account
 		target := merged[id]
 		if target == nil {
-			target = newCounters(item.Provider, item.Account, 0)
+			target = newCounters(key{provider: item.Provider, account: item.Account})
 			target.InFlight = "all"
 			merged[id] = target
 		}
@@ -327,13 +347,14 @@ func (store *Store) Write(record latency.Record) error {
 		minute:   record.Time.Truncate(time.Minute).Unix(),
 		provider: record.Provider,
 		account:  record.Account,
+		model:    record.Model,
 		bucket:   bucket,
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	counters := store.pending[id]
 	if counters == nil {
-		counters = newCounters(record.Provider, record.Account, bucket)
+		counters = newCounters(id)
 		store.pending[id] = counters
 	}
 	counters.add(record)
@@ -386,6 +407,10 @@ func (store *Store) Flush(ctx context.Context) error {
 	return err
 }
 
+const columns = `minute, provider, account, model, bucket, calls, ok, rate_limited, canceled,
+	errors, failovers, output_tokens, input_tokens, cache_read, cache_write, duration_ms,
+	wait_hist, rate_hist`
+
 func (store *Store) write(ctx context.Context, pending map[key]*Counters) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -393,12 +418,11 @@ func (store *Store) write(ctx context.Context, pending map[key]*Counters) error 
 	}
 	defer func() { _ = tx.Rollback() }()
 	for id, counters := range pending {
-		existing, err := scanCounters(tx.QueryRowContext(ctx,
-			`SELECT provider, account, bucket, calls, ok, rate_limited, canceled, errors,
-				failovers, output_tokens, duration_ms, wait_hist, rate_hist
-			FROM minutes WHERE minute = ? AND provider = ? AND account = ? AND bucket = ?`,
-			id.minute, id.provider, id.account, id.bucket))
-		merged := newCounters(id.provider, id.account, id.bucket)
+		existing, _, err := scanCounters(tx.QueryRowContext(ctx,
+			"SELECT "+columns+` FROM minutes
+			WHERE minute = ? AND provider = ? AND account = ? AND model = ? AND bucket = ?`,
+			id.minute, id.provider, id.account, id.model, id.bucket))
+		merged := newCounters(id)
 		merged.merge(counters)
 		if err == nil {
 			merged.merge(existing)
@@ -406,13 +430,12 @@ func (store *Store) write(ctx context.Context, pending map[key]*Counters) error 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR REPLACE INTO minutes (minute, provider, account, bucket, calls, ok,
-				rate_limited, canceled, errors, failovers, output_tokens, duration_ms,
-				wait_hist, rate_hist)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id.minute, id.provider, id.account, id.bucket, merged.Calls, merged.OK,
+			"INSERT OR REPLACE INTO minutes ("+columns+`)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id.minute, id.provider, id.account, id.model, id.bucket, merged.Calls, merged.OK,
 			merged.RateLimited, merged.Canceled, merged.Errors, merged.Failovers,
-			merged.OutputTokens, merged.DurationMS, merged.Wait.encode(), merged.Rate.encode(),
+			merged.OutputTokens, merged.InputTokens, merged.CacheReadTokens, merged.CacheWriteTokens,
+			merged.DurationMS, merged.Wait.encode(), merged.Rate.encode(),
 		); err != nil {
 			return err
 		}
@@ -424,60 +447,60 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func scanCounters(row scanner) (*Counters, error) {
+func scanCounters(row scanner) (*Counters, key, error) {
 	var (
-		provider, account, wait, rate string
-		bucket                        int
+		id         key
+		wait, rate string
 	)
 	counters := &Counters{}
-	if err := row.Scan(&provider, &account, &bucket, &counters.Calls, &counters.OK,
-		&counters.RateLimited, &counters.Canceled, &counters.Errors, &counters.Failovers,
-		&counters.OutputTokens, &counters.DurationMS, &wait, &rate); err != nil {
-		return nil, err
+	if err := row.Scan(&id.minute, &id.provider, &id.account, &id.model, &id.bucket,
+		&counters.Calls, &counters.OK, &counters.RateLimited, &counters.Canceled,
+		&counters.Errors, &counters.Failovers, &counters.OutputTokens, &counters.InputTokens,
+		&counters.CacheReadTokens, &counters.CacheWriteTokens, &counters.DurationMS,
+		&wait, &rate); err != nil {
+		return nil, key{}, err
 	}
-	result := newCounters(provider, account, bucket)
+	result := newCounters(id)
 	counters.Wait = decodeHistogram(wait, waitBounds)
 	counters.Rate = decodeHistogram(rate, rateBounds)
 	result.merge(counters)
-	return result, nil
+	return result, id, nil
 }
 
-// Summary returns counters merged by provider, account, and calls-in-flight
-// range for calls that started at or after since, including counters not yet
-// flushed. Rows are ordered by provider, account, and range.
-func (store *Store) Summary(ctx context.Context, since time.Time) ([]*Counters, error) {
+// aggregate merges stored and pending counters for minutes at or after since
+// into groups chosen by group, which maps a minute's key to its group key.
+func (store *Store) aggregate(ctx context.Context, since time.Time, group func(key) key) ([]*Counters, error) {
+	start := since.Truncate(time.Minute).Unix()
 	merged := map[key]*Counters{}
-	add := func(counters *Counters) {
-		id := key{provider: counters.Provider, account: counters.Account, bucket: counters.Bucket}
-		target := merged[id]
-		if target == nil {
-			target = newCounters(counters.Provider, counters.Account, counters.Bucket)
-			merged[id] = target
+	add := func(id key, counters *Counters) {
+		target := group(id)
+		if merged[target] == nil {
+			merged[target] = newCounters(target)
+			if target.minute != 0 {
+				merged[target].Start = time.Unix(target.minute, 0).UTC()
+			}
 		}
-		target.merge(counters)
+		merged[target].merge(counters)
 	}
-	rows, err := store.db.QueryContext(ctx,
-		`SELECT provider, account, bucket, calls, ok, rate_limited, canceled, errors,
-			failovers, output_tokens, duration_ms, wait_hist, rate_hist
-		FROM minutes WHERE minute >= ?`, since.Truncate(time.Minute).Unix())
+	rows, err := store.db.QueryContext(ctx, "SELECT "+columns+" FROM minutes WHERE minute >= ?", start)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		counters, err := scanCounters(rows)
+		counters, id, err := scanCounters(rows)
 		if err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
-		add(counters)
+		add(id, counters)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	store.mu.Lock()
 	for id, counters := range store.pending {
-		if id.minute >= since.Truncate(time.Minute).Unix() {
-			add(counters)
+		if id.minute >= start {
+			add(id, counters)
 		}
 	}
 	store.mu.Unlock()
@@ -487,15 +510,49 @@ func (store *Store) Summary(ctx context.Context, since time.Time) ([]*Counters, 
 		result = append(result, counters)
 	}
 	slices.SortFunc(result, func(left, right *Counters) int {
-		if compared := strings.Compare(left.Provider, right.Provider); compared != 0 {
+		if compared := left.Start.Compare(right.Start); compared != 0 {
 			return compared
 		}
-		if compared := strings.Compare(left.Account, right.Account); compared != 0 {
-			return compared
+		for _, pair := range [][2]string{
+			{left.Provider, right.Provider}, {left.Account, right.Account}, {left.Model, right.Model},
+		} {
+			if compared := strings.Compare(pair[0], pair[1]); compared != 0 {
+				return compared
+			}
 		}
 		return left.Bucket - right.Bucket
 	})
 	return result, nil
+}
+
+// Summary returns counters merged by provider, account, and calls-in-flight
+// range for calls that started at or after since, including counters not yet
+// flushed. Rows are ordered by provider, account, and range.
+func (store *Store) Summary(ctx context.Context, since time.Time) ([]*Counters, error) {
+	return store.aggregate(ctx, since, func(id key) key {
+		return key{provider: id.provider, account: id.account, bucket: id.bucket}
+	})
+}
+
+// Usage returns counters merged by period, provider, account, and model for
+// calls that started at or after since. Periods are step long and aligned to
+// step in the location of since, so a 24h step starts at local midnight.
+// A zero step returns one period per provider, account, and model.
+func (store *Store) Usage(ctx context.Context, since time.Time, step time.Duration) ([]*Counters, error) {
+	_, offset := since.Zone()
+	rows, err := store.aggregate(ctx, since, func(id key) key {
+		grouped := key{minute: 0, provider: id.provider, account: id.account, model: id.model}
+		if step > 0 {
+			seconds := int64(step.Seconds())
+			local := id.minute + int64(offset)
+			grouped.minute = local - local%seconds - int64(offset)
+		}
+		return grouped
+	})
+	for _, row := range rows {
+		row.InFlight = ""
+	}
+	return rows, err
 }
 
 // Oldest returns the start of the oldest stored minute, or the zero time when
