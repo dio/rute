@@ -19,21 +19,28 @@ fi
 
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd)
 version=${tag#v}
-source_name="rute_${version}_source.tar.gz"
 checksums_file="$repo_root/dist/checksums.txt"
 template="$repo_root/packaging/homebrew/rute.rb.tmpl"
 tap_repository=${HOMEBREW_TAP_REPOSITORY:-ssh://git@github.com/dio/homebrew-tap.git}
 tap_clone_repository=${HOMEBREW_TAP_CLONE_REPOSITORY:-https://github.com/dio/homebrew-tap.git}
 tap_name=${HOMEBREW_TAP_NAME:-dio/tap}
 
-checksum=$(awk -v name="$source_name" '$2 == name { print $1 }' "$checksums_file")
-if ! printf '%s\n' "$checksum" | grep -Eq '^[0-9a-f]{64}$'; then
-	printf 'Missing or invalid checksum for %s\n' "$source_name" >&2
-	exit 1
-fi
+# checksum_for prints the SHA-256 of the release archive for an OS and
+# architecture, such as darwin_arm64.
+checksum_for() {
+	archive="rute_${version}_$1.tar.gz"
+	checksum=$(awk -v name="$archive" '$2 == name { print $1 }' "$checksums_file")
+	if ! printf '%s\n' "$checksum" | grep -Eq '^[0-9a-f]{64}$'; then
+		printf 'Missing or invalid checksum for %s\n' "$archive" >&2
+		exit 1
+	fi
+	printf '%s\n' "$checksum"
+}
 
-commit=$(git -C "$repo_root" rev-parse "${tag}^{commit}")
-build_date=$(git -C "$repo_root" show -s --format=%cI "$commit")
+sha_darwin_arm64=$(checksum_for darwin_arm64)
+sha_darwin_amd64=$(checksum_for darwin_amd64)
+sha_linux_arm64=$(checksum_for linux_arm64)
+sha_linux_amd64=$(checksum_for linux_amd64)
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/rute-homebrew.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
@@ -64,9 +71,10 @@ formula="$tap_dir/Formula/rute.rb"
 sed \
 	-e "s|@TAG@|$tag|g" \
 	-e "s|@VERSION@|$version|g" \
-	-e "s|@SHA256@|$checksum|g" \
-	-e "s|@COMMIT@|$commit|g" \
-	-e "s|@BUILD_DATE@|$build_date|g" \
+	-e "s|@SHA256_DARWIN_ARM64@|$sha_darwin_arm64|g" \
+	-e "s|@SHA256_DARWIN_AMD64@|$sha_darwin_amd64|g" \
+	-e "s|@SHA256_LINUX_ARM64@|$sha_linux_arm64|g" \
+	-e "s|@SHA256_LINUX_AMD64@|$sha_linux_amd64|g" \
 	"$template" >"$formula"
 
 ruby -c "$formula"

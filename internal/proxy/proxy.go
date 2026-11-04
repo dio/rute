@@ -44,7 +44,7 @@ type credentialSource interface {
 	Release(accountID string)
 }
 
-// Config configures an OpenAI-compatible proxy handler.
+// Config configures the proxy handler.
 type Config struct {
 	UpstreamURL       string
 	ClaudeUpstreamURL string
