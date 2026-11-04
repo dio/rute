@@ -287,6 +287,9 @@ rute account remove \
 
 Stop the serving rute process before mutating its bundle from another process.
 Restart it afterward so the in-memory account pools match the stored records.
+The management dashboard's account forms perform the same add, reauth (or
+replace-key), and remove actions against a running rute, so no restart is
+needed there.
 
 If an account becomes `reauth_required`, complete `account reauth` for that
 provider and account name. If the entire bundle may have been disclosed,

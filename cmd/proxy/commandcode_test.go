@@ -1,14 +1,57 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
+
+func TestRunLaunchCommandCodeSignsInWhenNoAccounts(t *testing.T) {
+	// Not parallel: it swaps the package-level providers path.
+	models := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"gpt-5.6-sol","owned_by":"codex"}]}`))
+	}))
+	defer models.Close()
+
+	providersPath := filepath.Join(t.TempDir(), ".commandcode", "providers.json")
+	previous := commandCodeProvidersFile
+	commandCodeProvidersFile = func() (string, error) { return providersPath, nil }
+	t.Cleanup(func() { commandCodeProvidersFile = previous })
+
+	fake := &fakeManagement{t: t, proxyURL: models.URL}
+	launcher, stderr, ran, spawned := newTestLauncher(t, fake)
+	err := launcher.launchCommandCode(context.Background(), []string{"--yolo", "--trust"})
+	if code, ok := err.(exitCodeError); !ok || code != 3 {
+		t.Fatalf("launch error = %v, want the client's exit code 3", err)
+	}
+	if *spawned != 1 || fake.logins != 1 {
+		t.Fatalf("spawned %d, logins %d; want 1 each\n%s", *spawned, fake.logins, stderr)
+	}
+	if !strings.Contains(stderr.String(), "signing in to Command Code first") {
+		t.Errorf("stderr missing the sign-in notice:\n%s", stderr)
+	}
+	if ran.name != "cmd" || !slices.Equal(ran.args, []string{"--yolo", "--trust"}) {
+		t.Errorf("ran %s %v", ran.name, ran.args)
+	}
+	body, err := os.ReadFile(providersPath)
+	if err != nil {
+		t.Fatalf("read providers: %v", err)
+	}
+	if !strings.Contains(string(body), `"rute"`) {
+		t.Errorf("providers.json was not written:\n%s", body)
+	}
+}
 
 func TestEnsureCommandCodeProviderMergesAndPreserves(t *testing.T) {
 	t.Parallel()

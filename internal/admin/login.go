@@ -22,6 +22,7 @@ import (
 const (
 	ActionAdd    = "add"
 	ActionReauth = "reauth"
+	ActionRemove = "remove"
 )
 
 // Login states.
@@ -137,7 +138,8 @@ type logins struct {
 	order []string
 }
 
-// target validates an add or reauth against a provider's pool and returns it.
+// target validates an add, reauth, or remove against a provider's pool and
+// returns it.
 func (manager *logins) target(provider, name, action string) (*codexpool.Pool, error) {
 	pool := manager.pools[provider]
 	if pool == nil {
@@ -157,18 +159,30 @@ func (manager *logins) target(provider, name, action string) (*codexpool.Pool, e
 		if exists {
 			return nil, fmt.Errorf("%s account %q already exists; reauthenticate it instead", provider, name)
 		}
-	case ActionReauth:
+	case ActionReauth, ActionRemove:
 		if !exists {
 			return nil, fmt.Errorf("%s account %q does not exist", provider, name)
 		}
 	default:
-		return nil, fmt.Errorf("action must be %s or %s", ActionAdd, ActionReauth)
+		return nil, fmt.Errorf("action must be %s, %s, or %s", ActionAdd, ActionReauth, ActionRemove)
 	}
 	return pool, nil
 }
 
+// remove deletes an account without a login.
+func (manager *logins) remove(provider, name string) error {
+	pool, err := manager.target(provider, name, ActionRemove)
+	if err != nil {
+		return err
+	}
+	return pool.Delete(context.Background(), name)
+}
+
 // putKey adds or replaces an API-key account without a browser login.
 func (manager *logins) putKey(provider, name, action, apiKey string) (Login, error) {
+	if action == ActionRemove {
+		return Login{}, errors.New("remove does not take an API key")
+	}
 	pool, err := manager.target(provider, name, action)
 	if err != nil {
 		return Login{}, err
@@ -198,6 +212,9 @@ func (manager *logins) putKey(provider, name, action, apiKey string) (Login, err
 }
 
 func (manager *logins) begin(provider, name, action string) (Login, error) {
+	if action == ActionRemove {
+		return Login{}, errors.New("remove is not a login action")
+	}
 	pool, err := manager.target(provider, name, action)
 	if err != nil {
 		return Login{}, err

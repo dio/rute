@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dio/rute/internal/accountstore"
+	"github.com/dio/rute/internal/admin"
 )
 
 const (
@@ -24,8 +25,7 @@ const (
 )
 
 // runLaunchCommandCode implements "rute cmd". Every argument goes to the
-// Command Code CLI; a leading "--" is dropped. It registers rute as a BYOK
-// provider (when absent) so the CLI routes models through the local proxy.
+// Command Code CLI; a leading "--" is dropped.
 func runLaunchCommandCode(
 	ctx context.Context,
 	args []string,
@@ -35,7 +35,12 @@ func runLaunchCommandCode(
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
-	launcher := newLauncher(stderr, getenv)
+	return newLauncher(stderr, getenv).launchCommandCode(ctx, args)
+}
+
+// launchCommandCode signs in when rute has no accounts yet, registers rute as
+// a BYOK provider (when absent), and runs the Command Code CLI.
+func (launcher *launcher) launchCommandCode(ctx context.Context, args []string) error {
 	if _, err := launcher.lookPath(commandCodeCLIName); err != nil {
 		return fmt.Errorf("%s is not installed or not on PATH", commandCodeCLIName)
 	}
@@ -47,9 +52,15 @@ func runLaunchCommandCode(
 	if proxyURL == "" {
 		proxyURL = "http://" + defaultListenAddress
 	}
-	if err := ensureCommandCodeProvider(proxyURL, stderr); err != nil {
+	if totalAccounts(status) == 0 {
+		_, _ = fmt.Fprintln(launcher.stderr, "rute: no accounts yet; signing in to Command Code first")
+		if err := launcher.ensureAccount(ctx, accountstore.ProviderCommandCode, status); err != nil {
+			return err
+		}
+	}
+	if err := ensureCommandCodeProvider(proxyURL, launcher.stderr); err != nil {
 		_, _ = fmt.Fprintf(
-			stderr,
+			launcher.stderr,
 			"rute: could not register the %q Command Code provider: %v\n",
 			commandCodeProviderID,
 			err,
@@ -60,11 +71,24 @@ func runLaunchCommandCode(
 	return launcher.run(ctx, commandCodeCLIName, args, os.Environ())
 }
 
+// totalAccounts counts the accounts across every provider a running rute
+// serves.
+func totalAccounts(status admin.StatusResponse) int {
+	total := 0
+	for _, provider := range status.Providers {
+		total += len(provider.Accounts)
+	}
+	return total
+}
+
+// commandCodeProvidersFile resolves the providers.json path. It is a variable
+// so tests can redirect it.
+var commandCodeProvidersFile = commandCodeProvidersPath
+
 // ensureCommandCodeProvider registers the rute BYOK provider in
-// ~/.commandcode/providers.json when it is missing. An existing entry is left
-// untouched, and every other provider is preserved.
+// ~/.commandcode/providers.json when it is missing.
 func ensureCommandCodeProvider(proxyURL string, stderr io.Writer) error {
-	path, err := commandCodeProvidersPath()
+	path, err := commandCodeProvidersFile()
 	if err != nil {
 		return err
 	}

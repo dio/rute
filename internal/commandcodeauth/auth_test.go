@@ -83,6 +83,8 @@ func TestAuthenticateReportsDenial(t *testing.T) {
 
 func TestCallbackRejectsMismatchedState(t *testing.T) {
 	t.Parallel()
+
+	// A callback carrying a result belongs to another attempt: fail now.
 	completed := make(chan result, 1)
 	handler := callbackHandler("expected-state", func(value result) { completed <- value })
 	request := httptest.NewRequest(
@@ -96,8 +98,27 @@ func TestCallbackRejectsMismatchedState(t *testing.T) {
 		t.Fatalf("status = %d", recorder.Code)
 	}
 	select {
-	case <-completed:
-		t.Fatal("mismatched state completed the login")
+	case value := <-completed:
+		if value.err == nil {
+			t.Fatal("mismatched callback completed without an error")
+		}
+	default:
+		t.Fatal("mismatched callback did not complete the login")
+	}
+
+	// A bare request must not abort a login that is still in progress.
+	bare := make(chan result, 1)
+	handler = callbackHandler("expected-state", func(value result) { bare <- value })
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodGet, "http://127.0.0.1/callback", nil,
+	))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("bare status = %d", recorder.Code)
+	}
+	select {
+	case <-bare:
+		t.Fatal("a bare request completed the login")
 	default:
 	}
 }

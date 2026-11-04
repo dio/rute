@@ -324,6 +324,18 @@ func (server *Server) handleLoginAPI(writer http.ResponseWriter, request *http.R
 		body.Action = ActionAdd
 	}
 	name := strings.TrimSpace(body.Name)
+	if body.Action == ActionRemove {
+		if err := server.logins.remove(body.Provider, name); err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"provider": body.Provider,
+			"name":     name,
+			"removed":  true,
+		})
+		return
+	}
 	if strings.TrimSpace(body.APIKey) != "" {
 		login, err := server.logins.putKey(body.Provider, name, body.Action, body.APIKey)
 		if err != nil {

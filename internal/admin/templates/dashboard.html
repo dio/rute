@@ -34,7 +34,12 @@
       <input type="hidden" name="provider" value="{{.Provider}}">
       <input type="hidden" name="name" value="{{.Name}}">
       <input type="hidden" name="action" value="reauth">
-      <button>log in again</button></form>{{end}}{{if .CanReplaceKey}}<a href="/accounts/new?provider={{.Provider}}&amp;name={{.Name}}&amp;action=reauth">replace key</a>{{end}}</td>
+      <button>log in again</button></form>{{end}}{{if .CanReplaceKey}}<a href="/accounts/new?provider={{.Provider}}&amp;name={{.Name}}&amp;action=reauth">replace key</a>{{end}}<form class="inline" method="post" action="/accounts">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <input type="hidden" name="provider" value="{{.Provider}}">
+      <input type="hidden" name="name" value="{{.Name}}">
+      <input type="hidden" name="action" value="remove">
+      <button>remove</button></form></td>
   </tr>
   {{else}}
   <tr><td colspan="11" class="muted">no accounts</td></tr>
