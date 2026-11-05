@@ -19,14 +19,15 @@ import (
 
 // fakeManagement serves the management endpoints the launcher uses.
 type fakeManagement struct {
-	t        *testing.T
-	up       atomic.Bool
-	attached atomic.Int32
-	mu       sync.Mutex
-	accounts []codexpool.AccountStatus
-	proxyURL string
-	logins   int
-	polls    int
+	t          *testing.T
+	up         atomic.Bool
+	attached   atomic.Int32
+	mu         sync.Mutex
+	accounts   []codexpool.AccountStatus
+	proxyURL   string
+	lastAPIKey string
+	logins     int
+	polls      int
 }
 
 func (fake *fakeManagement) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -56,6 +57,7 @@ func (fake *fakeManagement) ServeHTTP(writer http.ResponseWriter, request *http.
 		if request.Header.Get("Content-Type") != "application/json" || body["name"] != "default" || body["action"] != "add" {
 			fake.t.Errorf("login request %v, %q", body, request.Header.Get("Content-Type"))
 		}
+		fake.lastAPIKey = body["api_key"]
 		fake.logins++
 		writer.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(writer).Encode(admin.Login{ID: "l1", State: admin.LoginPending,
