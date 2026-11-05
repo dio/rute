@@ -147,6 +147,7 @@ type accountOptions struct {
 	output         string
 	apiKey         string
 	apiKeyEnv      string
+	yes            bool
 	loginTimeout   time.Duration
 	credentialKind string
 	credentialFile string
@@ -757,6 +758,36 @@ func runAccount(
 			opts.name,
 		)
 		return err
+	case "clear":
+		if !opts.yes {
+			return errors.New("account clear removes every account; pass -yes to confirm")
+		}
+		providers := []string{
+			accountstore.ProviderCodex,
+			accountstore.ProviderClaude,
+			accountstore.ProviderCommandCode,
+		}
+		if opts.provider != "" {
+			providers = []string{opts.provider}
+		}
+		removed := 0
+		for _, provider := range providers {
+			pool, err := newProviderPool(ctx, store, provider, stderr)
+			if err != nil {
+				return storageHint(opts.credentialKind, err)
+			}
+			count, err := pool.Clear(ctx)
+			removed += count
+			if err != nil {
+				return storageHint(opts.credentialKind, err)
+			}
+		}
+		if removed == 0 {
+			_, err := fmt.Fprintln(stdout, "No accounts to remove.")
+			return err
+		}
+		_, err := fmt.Fprintf(stdout, "Removed %d accounts.\n", removed)
+		return err
 	case "remove":
 		pool, err := newProviderPool(ctx, store, opts.provider, stderr)
 		if err != nil {
@@ -982,12 +1013,12 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error) {
 	if len(args) == 0 {
 		return accountOptions{}, errors.New(
-			"account action is required: add, history, list, reauth, or remove",
+			"account action is required: add, clear, history, list, reauth, or remove",
 		)
 	}
 	opts := accountOptions{action: args[0]}
 	switch opts.action {
-	case "add", "history", "reauth", "remove", "list":
+	case "add", "clear", "history", "reauth", "remove", "list":
 	default:
 		return accountOptions{}, fmt.Errorf("unsupported account action %q", opts.action)
 	}
@@ -996,6 +1027,9 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 	providerHelp := "account provider: codex, claude, or commandcode (default: codex)"
 	if opts.action == "list" || opts.action == "history" {
 		providerHelp = "account provider filter: codex, claude, or commandcode (default: all)"
+	}
+	if opts.action == "clear" {
+		providerHelp = "account provider to clear: codex, claude, or commandcode (default: all)"
 	}
 	flags.StringVar(
 		&opts.provider,
@@ -1025,6 +1059,9 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			"",
 			"environment variable holding the API key",
 		)
+	}
+	if opts.action == "clear" {
+		flags.BoolVar(&opts.yes, "yes", false, "confirm removing every account")
 	}
 	if opts.action == "history" {
 		flags.StringVar(
@@ -1064,7 +1101,7 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			return accountOptions{}, errors.New("unexpected positional arguments")
 		}
 	}
-	if opts.action != "list" && opts.action != "history" {
+	if opts.action != "list" && opts.action != "history" && opts.action != "clear" {
 		if opts.provider == "" {
 			opts.provider = accountstore.ProviderCodex
 		}

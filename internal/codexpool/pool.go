@@ -507,6 +507,29 @@ func (pool *Pool) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
+// Clear removes every account in the pool and returns how many were removed.
+func (pool *Pool) Clear(ctx context.Context) (int, error) {
+	names := make([]string, 0)
+	for _, record := range pool.Accounts() {
+		names = append(names, record.Name)
+	}
+	removed := 0
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		err := pool.Delete(ctx, name)
+		if errors.Is(err, accountstore.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 // Accounts returns redacted account metadata.
 func (pool *Pool) Accounts() []accountstore.Account {
 	pool.mu.Lock()
