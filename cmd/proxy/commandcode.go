@@ -121,9 +121,16 @@ func (launcher *launcher) launchCommandCode(ctx context.Context, args []string) 
 }
 
 // commandCodeEnv gives cmd rute's prepared home, so its own ~/.commandcode
-// login, providers, and plan are not used.
+// login, providers, and plan are not used. The placeholder key satisfies cmd's
+// login check (headless -p refuses to run without one); requests go to rute,
+// and --local-only keeps the Command Code backend disabled.
 func commandCodeEnv(home string) []string {
-	return append(os.Environ(), "HOME="+home, "USERPROFILE="+home)
+	return append(
+		os.Environ(),
+		"HOME="+home,
+		"USERPROFILE="+home,
+		"COMMAND_CODE_API_KEY=rute",
+	)
 }
 
 // commandCodeArgs keeps every request on rute: --local-only disables the

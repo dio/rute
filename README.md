@@ -791,8 +791,10 @@ The prepared home keeps the session on rute:
   and the models rute can serve, including Command Code's own models under
   `commandcode/<model>`; and
 - `cmd` runs with `--local-only`, so the Command Code backend is disabled and
-  requests cannot fall through to your plan. Unless you pass `-m`, the session
-  starts on the model `cmd` was already configured with when rute offers it.
+  requests cannot fall through to your plan, and with a placeholder
+  `COMMAND_CODE_API_KEY`, so headless `-p` runs start without a login. Unless
+  you pass `-m`, the session starts on the model `cmd` was already configured
+  with when rute offers it.
 
 Because `cmd` has no config-directory flag, isolating it means overriding
 `HOME`. To keep the tools the agent runs working, rute symlinks your

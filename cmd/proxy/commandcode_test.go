@@ -55,6 +55,9 @@ func TestRunLaunchCommandCodeSignsInWhenNoAccounts(t *testing.T) {
 	if !slices.Contains(ran.env, "HOME="+home) {
 		t.Errorf("cmd did not run with rute's home; env = %v", ran.env)
 	}
+	if !slices.Contains(ran.env, "COMMAND_CODE_API_KEY=rute") {
+		t.Errorf("cmd did not get the placeholder key; env = %v", ran.env)
+	}
 	body, err := os.ReadFile(filepath.Join(home, ".commandcode", "providers.json"))
 	if err != nil {
 		t.Fatalf("read providers: %v", err)
