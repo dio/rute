@@ -768,13 +768,19 @@ rute cmd -m rute/gpt-5.6-sol
 ```
 
 The `rute` entry points the CLI at the local proxy with a keyless endpoint
-(`apiKey: false`), so its models appear under `rute/` in `/model`. An existing
-`rute` entry, and every other provider in the file, is left untouched; edit or
-remove the entry by hand to change it.
+(`apiKey: false`), so its models appear under `rute/` in `/model`. The entry is
+rewritten on every run because the background rute picks a free port, so its
+`baseURL` and model list follow the running daemon; models you add to the entry
+yourself are kept. An existing entry, and every other provider in the file, is
+preserved.
 
-When rute has no accounts yet, `rute cmd` signs in to Command Code first, the
-same browser login `rute account add -provider=commandcode` uses. With accounts
-already configured, it runs the CLI directly.
+When the Command Code pool is empty, `rute cmd` first reuses the key `cmd`
+already signed in with (`~/.commandcode/auth.json`) as a `commandcode` account,
+so you do not sign in twice. If there is no such key and rute has no accounts at
+all, it runs the browser login; if rute has other accounts, it prints a hint and
+continues. The models offered are those rute reports on `/v1/models` — the
+default model plus any `-models-file` aliases — so pick a `rute/<model>` entry
+in `/model`.
 
 ### Supplying credentials non-interactively
 

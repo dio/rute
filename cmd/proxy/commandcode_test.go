@@ -29,6 +29,12 @@ func TestRunLaunchCommandCodeSignsInWhenNoAccounts(t *testing.T) {
 	commandCodeProvidersFile = func() (string, error) { return providersPath, nil }
 	t.Cleanup(func() { commandCodeProvidersFile = previous })
 
+	// No cmd auth file, so the launcher falls back to the browser login.
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	previousAuth := commandCodeAuthFile
+	commandCodeAuthFile = func() (string, error) { return authPath, nil }
+	t.Cleanup(func() { commandCodeAuthFile = previousAuth })
+
 	fake := &fakeManagement{t: t, proxyURL: models.URL}
 	launcher, stderr, ran, spawned := newTestLauncher(t, fake)
 	err := launcher.launchCommandCode(context.Background(), []string{"--yolo", "--trust"})
@@ -122,25 +128,86 @@ func TestEnsureCommandCodeProviderMergesAndPreserves(t *testing.T) {
 	}
 }
 
-func TestEnsureCommandCodeProviderLeavesExistingEntry(t *testing.T) {
+func TestEnsureCommandCodeProviderRefreshesExistingEntry(t *testing.T) {
 	t.Parallel()
+	models := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"gpt-5.6-sol","owned_by":"codex"}]}`))
+	}))
+	defer models.Close()
+
 	path := filepath.Join(t.TempDir(), ".commandcode", "providers.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("create config directory: %v", err)
 	}
-	seed := `{"provider":{"rute":{"baseURL":"http://custom","models":{"m":{}}}}}`
+	seed := `{"provider":{"rute":{"baseURL":"http://stale:1/v1",` +
+		`"api":"openai-responses","apiKey":false,` +
+		`"models":{"custom-model":{"api":"openai-responses"}}}},"other":{"keep":true}}`
 	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
-	// An unreachable proxy URL proves no model fetch happens for an existing entry.
-	if err := ensureCommandCodeProviderAt(path, "http://127.0.0.1:1", io.Discard); err != nil {
+
+	if err := ensureCommandCodeProviderAt(path, models.URL, io.Discard); err != nil {
 		t.Fatalf("ensure provider: %v", err)
 	}
+
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read providers: %v", err)
 	}
-	if string(body) != seed {
-		t.Errorf("existing providers.json changed: %s", body)
+	var document map[string]any
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatalf("decode providers: %v", err)
+	}
+	if _, ok := document["other"]; !ok {
+		t.Error("an unrelated top-level key was dropped")
+	}
+	providers, _ := document["provider"].(map[string]any)
+	rute, _ := providers["rute"].(map[string]any)
+	if rute["baseURL"] != models.URL+"/v1" {
+		t.Errorf("baseURL was not refreshed: %v", rute["baseURL"])
+	}
+	entries, _ := rute["models"].(map[string]any)
+	if _, ok := entries["custom-model"]; !ok {
+		t.Error("a user-added model was dropped")
+	}
+	if _, ok := entries["gpt-5.6-sol"]; !ok {
+		t.Error("the current model was not added")
+	}
+}
+
+func TestImportCommandCodeKeyFromCmdAuthFile(t *testing.T) {
+	// Not parallel: it swaps the package-level auth path.
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte(`{"apiKey":"key-123","userId":"u1"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	previous := commandCodeAuthFile
+	commandCodeAuthFile = func() (string, error) { return path, nil }
+	t.Cleanup(func() { commandCodeAuthFile = previous })
+
+	fake := &fakeManagement{t: t}
+	fake.up.Store(true)
+	launcher, stderr, _, _ := newTestLauncher(t, fake)
+	if _, err := launcher.ensureServer(context.Background()); err != nil {
+		t.Fatalf("ensure server: %v", err)
+	}
+	imported, err := launcher.importCommandCodeKey(context.Background())
+	if err != nil || !imported {
+		t.Fatalf("import = %v, %v", imported, err)
+	}
+	if fake.lastAPIKey != "key-123" {
+		t.Errorf("imported API key = %q", fake.lastAPIKey)
+	}
+	if !strings.Contains(stderr.String(), "imported the Command Code key") {
+		t.Errorf("stderr missing the import notice:\n%s", stderr)
+	}
+
+	commandCodeAuthFile = func() (string, error) {
+		return filepath.Join(t.TempDir(), "missing.json"), nil
+	}
+	imported, err = launcher.importCommandCodeKey(context.Background())
+	if err != nil || imported {
+		t.Errorf("missing auth file: imported = %v, err = %v", imported, err)
 	}
 }
