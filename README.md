@@ -114,6 +114,10 @@ directory; the running server records its URLs and process ID in
 
 The dashboard's **restart** button does the same as `rute admin reload`.
 
+When `rute claude`, `rute codex`, `rute cmd`, or `rute admin` finds a running
+rute started by a different binary, it prints a warning naming both versions;
+run `rute admin reload` to restart it on the current binary.
+
 Routing changed on the dashboard is saved to `routing.json` in the state
 directory, so the next background rute uses it.
 
@@ -289,6 +293,8 @@ rute account history
 rute account history -provider=claude personal
 rute account reauth -provider=claude personal
 rute account remove -provider=claude personal
+rute account clear -yes                  # remove every account, all providers
+rute account clear -yes -provider=claude # remove one provider's accounts
 ```
 
 `rute account list` lists every stored account across all supported providers:
@@ -440,7 +446,8 @@ remove`, and the change joins the running pool without a restart. The add form
 takes an optional API key: paste one to store an API-key account for any
 provider, or leave it blank to authorize in the browser. Each account row shows
 its auth mode (`oauth` or `api key`), offers **log in again** for OAuth accounts
-and **replace key** for API-key accounts, and can be removed.
+and **replace key** for API-key accounts, and can be removed. A **remove all
+accounts** link clears every provider's accounts after a confirmation page.
 
 **change routing** sets a provider's balance mode, account order, and max in
 flight, with the same rules as the `-<provider>-balance`,
@@ -458,6 +465,7 @@ The same data is available as JSON:
 | `GET /v1/calls/recent?limit=50` | the newest calls |
 | `POST /v1/logins` with `{"provider":"claude","name":"personal","action":"add"}` | a login with its `authorization_url`; `action` is `add`, `reauth`, or `remove`. With an `api_key` field, an `add` or `reauth` stores the key instead of returning a login, and `remove` deletes the account |
 | `GET /v1/logins/{id}` | the login's `state`: `pending`, `done`, or `failed` |
+| `POST /v1/accounts/clear` with `{}` | removes every account and returns `{"removed": N}`; a `provider` field clears only that provider |
 | `GET /v1/usage?window=7d&by=day` | tokens and estimated cost per period, account, and model (`window`: `24h`, `7d`, `30d`; `by`: `hour`, `day`, `total`) |
 | `POST /v1/restart` with `{}` | restarts rute on the same ports (202); 503 when it was started with `-server-file=off` |
 | `PUT /v1/providers/claude/routing` with `{"balance":"priority","order":["default","personal"],"max_in_flight":6}` | the provider's new status; invalid routing returns 400 and changes nothing |

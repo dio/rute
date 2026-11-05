@@ -119,6 +119,8 @@ func New(config Config) (*Server, error) {
 	}
 	server.mux.HandleFunc("GET /{$}", server.handleDashboard)
 	server.mux.HandleFunc("GET /accounts/new", server.handleNewAccount)
+	server.mux.HandleFunc("GET /accounts/clear", server.handleClearAccountsPage)
+	server.mux.HandleFunc("POST /accounts/clear", server.handleClearAccountsForm)
 	server.mux.HandleFunc("GET /usage", server.handleUsagePage)
 	server.mux.HandleFunc("POST /accounts", server.handleAccountForm)
 	server.mux.HandleFunc("GET /logins/{id}", server.handleLoginPage)
@@ -133,6 +135,7 @@ func New(config Config) (*Server, error) {
 	server.mux.HandleFunc("GET /v1/usage", server.handleUsageAPI)
 	server.mux.HandleFunc("POST /v1/logins", server.handleLoginAPI)
 	server.mux.HandleFunc("GET /v1/logins/{id}", server.handleLoginStatus)
+	server.mux.HandleFunc("POST /v1/accounts/clear", server.handleClearAccountsAPI)
 	server.mux.HandleFunc("PUT /v1/providers/{provider}/routing", server.handleRoutingAPI)
 	return server, nil
 }
@@ -364,6 +367,37 @@ func (server *Server) handleLoginStatus(writer http.ResponseWriter, request *htt
 		return
 	}
 	writeJSON(writer, http.StatusOK, login)
+}
+
+// handleClearAccountsAPI removes every account, or one provider's accounts when
+// the body names a provider. Requiring a JSON body means a cross-site HTML form
+// cannot submit it.
+func (server *Server) handleClearAccountsAPI(writer http.ResponseWriter, request *http.Request) {
+	mediaType, _, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if mediaType != "application/json" {
+		writeError(writer, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxFormBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	provider := strings.TrimSpace(body.Provider)
+	if provider != "" && !validProvider(provider) {
+		writeError(writer, http.StatusBadRequest, "provider must be codex, claude, or commandcode")
+		return
+	}
+	removed, err := server.logins.removeAll(provider)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"removed": removed})
 }
 
 var errHistoryDisabled = errors.New("call history is disabled; start rute without -metrics-db=off")

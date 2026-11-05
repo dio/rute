@@ -164,6 +164,32 @@ func TestParseAccountOptionsCommandCode(t *testing.T) {
 	}
 }
 
+func TestParseAccountOptionsClear(t *testing.T) {
+	t.Parallel()
+
+	opts, err := parseAccountOptions([]string{"clear", "-yes"}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("parse clear: %v", err)
+	}
+	if opts.action != "clear" || !opts.yes || opts.provider != "" {
+		t.Errorf("options = %+v", opts)
+	}
+	opts, err = parseAccountOptions([]string{"clear", "-yes", "-provider=claude"}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("parse provider clear: %v", err)
+	}
+	if opts.provider != "claude" {
+		t.Errorf("provider = %q", opts.provider)
+	}
+	opts, err = parseAccountOptions([]string{"clear"}, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("parse clear without -yes: %v", err)
+	}
+	if opts.yes {
+		t.Error("yes = true without -yes")
+	}
+}
+
 func TestRunAccountHistoryFileStore(t *testing.T) {
 	t.Parallel()
 

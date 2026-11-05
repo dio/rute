@@ -48,6 +48,8 @@
 <p><a href="/accounts/new?provider={{.Name}}">add {{.Name}} account</a></p>
 {{end}}
 
+{{if .TotalAccounts}}<p><a href="/accounts/clear" class="attention">remove all accounts</a></p>{{end}}
+
 <h2>Calls by calls in flight</h2>
 <nav>{{range .Windows}}<a href="/?window={{.}}&amp;refresh={{$.Refresh.Name}}"{{if eq . $.Window}} class="on"{{end}}>{{.}}</a>{{end}}</nav>
 {{if not .History}}

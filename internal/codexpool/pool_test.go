@@ -106,6 +106,37 @@ func TestPoolLoadsPersistedAPIKeyAccounts(t *testing.T) {
 	}
 }
 
+func TestPoolClearRemovesEveryAccount(t *testing.T) {
+	t.Parallel()
+
+	pool, err := NewProvider(
+		context.Background(),
+		accountstore.NewMemoryStore(),
+		accountstore.ProviderCommandCode,
+		codexauth.Config{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	for _, name := range []string{"one", "two"} {
+		if _, err := pool.AddAPIKey(context.Background(), name, "key-"+name, ""); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+	}
+	removed, err := pool.Clear(context.Background())
+	if err != nil || removed != 2 {
+		t.Fatalf("clear = %d, %v", removed, err)
+	}
+	if accounts := pool.Accounts(); len(accounts) != 0 {
+		t.Errorf("accounts remain: %+v", accounts)
+	}
+	removed, err = pool.Clear(context.Background())
+	if err != nil || removed != 0 {
+		t.Errorf("second clear = %d, %v", removed, err)
+	}
+}
+
 func TestPoolAuditsAccountLifecycle(t *testing.T) {
 	t.Parallel()
 

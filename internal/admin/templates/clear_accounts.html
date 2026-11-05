@@ -1,0 +1,17 @@
+{{template "head"}}
+<title>rute · remove all accounts</title>
+</head>
+<body>
+<header><b><a href="/">rute</a></b><span>remove all accounts</span></header>
+<form method="post" action="/accounts/clear" class="box">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  {{if .Total}}
+  <p>This removes all {{.Total}} accounts from every provider in the active credential store. It cannot be undone.</p>
+  <button class="attention">remove all {{.Total}} accounts</button>
+  {{else}}
+  <p class="muted">There are no accounts to remove.</p>
+  {{end}}
+</form>
+<p><a href="/">cancel</a></p>
+</body>
+</html>

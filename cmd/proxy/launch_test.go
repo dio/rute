@@ -25,6 +25,7 @@ type fakeManagement struct {
 	mu         sync.Mutex
 	accounts   []codexpool.AccountStatus
 	proxyURL   string
+	version    string
 	lastAPIKey string
 	logins     int
 	polls      int
@@ -44,6 +45,7 @@ func (fake *fakeManagement) ServeHTTP(writer http.ResponseWriter, request *http.
 			proxyURL = "http://127.0.0.1:20999"
 		}
 		_ = json.NewEncoder(writer).Encode(admin.StatusResponse{
+			Version:  fake.version,
 			ProxyURL: proxyURL,
 			Providers: []codexpool.Status{
 				{Provider: "claude", Accounts: fake.accounts},
@@ -186,6 +188,38 @@ func TestLaunchReportsServerThatExits(t *testing.T) {
 	err := launcher.launch(context.Background(), "claude", nil)
 	if err == nil || !strings.Contains(err.Error(), "/state/rute.log") {
 		t.Errorf("launch error = %v, want the log path", err)
+	}
+}
+
+func TestLaunchWarnsWhenDaemonVersionDiffers(t *testing.T) {
+	t.Parallel()
+	fake := &fakeManagement{
+		t:        t,
+		accounts: []codexpool.AccountStatus{{Name: "default"}},
+		version:  "0.0.1-old",
+	}
+	fake.up.Store(true)
+	launcher, stderr, _, _ := newTestLauncher(t, fake)
+	_ = launcher.launch(context.Background(), "claude", nil)
+	output := stderr.String()
+	if !strings.Contains(output, "the running rute is 0.0.1-old") ||
+		!strings.Contains(output, "run 'rute admin reload'") {
+		t.Errorf("stderr missing the version warning:\n%s", output)
+	}
+}
+
+func TestLaunchDoesNotWarnWhenDaemonVersionMatches(t *testing.T) {
+	t.Parallel()
+	fake := &fakeManagement{
+		t:        t,
+		accounts: []codexpool.AccountStatus{{Name: "default"}},
+		version:  version,
+	}
+	fake.up.Store(true)
+	launcher, stderr, _, _ := newTestLauncher(t, fake)
+	_ = launcher.launch(context.Background(), "claude", nil)
+	if strings.Contains(stderr.String(), "the running rute is") {
+		t.Errorf("unexpected version warning:\n%s", stderr)
 	}
 }
 

@@ -57,6 +57,8 @@ type launcher struct {
 	lookPath    func(name string) (string, error)
 	run         func(ctx context.Context, name string, args, env []string) error
 	poll        time.Duration
+	// warnedVersion reports whether the version mismatch was already reported.
+	warnedVersion bool
 }
 
 func newLauncher(stderr io.Writer, getenv func(string) string) *launcher {
@@ -186,10 +188,28 @@ func (launcher *launcher) discover(ctx context.Context) (admin.StatusResponse, e
 		launcher.adminURL = url
 		var status admin.StatusResponse
 		if status, err = launcher.status(ctx); err == nil {
+			launcher.warnVersion(status.Version)
 			return status, nil
 		}
 	}
 	return admin.StatusResponse{}, err
+}
+
+// warnVersion tells the user when the running daemon was started by a binary
+// other than the one they are invoking, which otherwise silently serves the
+// old build.
+func (launcher *launcher) warnVersion(running string) {
+	if launcher.warnedVersion || running == "" || running == version {
+		return
+	}
+	launcher.warnedVersion = true
+	_, _ = fmt.Fprintf(
+		launcher.stderr,
+		"rute: the running rute is %s, but this is rute %s; "+
+			"run 'rute admin reload' to restart it on this binary\n",
+		running,
+		version,
+	)
 }
 
 // ensureServer returns the status of a running rute, starting one in the

@@ -178,6 +178,27 @@ func (manager *logins) remove(provider, name string) error {
 	return pool.Delete(context.Background(), name)
 }
 
+// removeAll deletes every account in the named provider, or in every provider
+// when provider is empty. It returns how many accounts were removed.
+func (manager *logins) removeAll(provider string) (int, error) {
+	if provider != "" {
+		pool := manager.pools[provider]
+		if pool == nil {
+			return 0, fmt.Errorf("provider %q is not available", provider)
+		}
+		return pool.Clear(context.Background())
+	}
+	total := 0
+	for _, pool := range manager.pools {
+		removed, err := pool.Clear(context.Background())
+		total += removed
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
 // putKey adds or replaces an API-key account without a browser login.
 func (manager *logins) putKey(provider, name, action, apiKey string) (Login, error) {
 	if action == ActionRemove {

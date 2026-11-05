@@ -30,6 +30,8 @@ type dashboardView struct {
 	Providers []providerView
 	Latency   []latencyView
 	Recent    []recentView
+	// TotalAccounts is the number of accounts across every provider.
+	TotalAccounts int
 }
 
 type providerView struct {
@@ -129,6 +131,9 @@ func (server *Server) handleDashboard(writer http.ResponseWriter, request *http.
 		History:    status.History,
 		CanRestart: status.CanRestart,
 		CSRF:       server.csrf,
+	}
+	for _, provider := range status.Providers {
+		view.TotalAccounts += len(provider.Accounts)
 	}
 	for _, item := range windows {
 		view.Windows = append(view.Windows, item.name)
@@ -335,6 +340,42 @@ func (server *Server) handleAccountForm(writer http.ResponseWriter, request *htt
 		return
 	}
 	http.Redirect(writer, request, "/logins/"+login.ID, http.StatusSeeOther)
+}
+
+type clearAccountsView struct {
+	CSRF  string
+	Total int
+}
+
+// accountCount counts the accounts across every provider the server serves.
+func (server *Server) accountCount() int {
+	total := 0
+	for _, provider := range server.status().Providers {
+		total += len(provider.Accounts)
+	}
+	return total
+}
+
+// handleClearAccountsPage asks for confirmation before removing every account.
+func (server *Server) handleClearAccountsPage(writer http.ResponseWriter, _ *http.Request) {
+	server.render(writer, "clear_accounts.html", clearAccountsView{
+		CSRF:  server.csrf,
+		Total: server.accountCount(),
+	})
+}
+
+// handleClearAccountsForm removes every account after the confirmation form.
+func (server *Server) handleClearAccountsForm(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxFormBytes)
+	if err := request.ParseForm(); err != nil || !server.checkCSRF(request) {
+		writeError(writer, http.StatusForbidden, "invalid form token; reload the page and try again")
+		return
+	}
+	if _, err := server.logins.removeAll(""); err != nil {
+		writeError(writer, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(writer, request, "/", http.StatusSeeOther)
 }
 
 type loginView struct {
