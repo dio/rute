@@ -501,7 +501,7 @@ func fetchCommandCodeModels(apiKey string) ([]commandCodeModel, error) {
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Command Code returned %s", response.Status)
+		return nil, fmt.Errorf("command code returned %s", response.Status)
 	}
 	var payload struct {
 		Data []commandCodeModel `json:"data"`
