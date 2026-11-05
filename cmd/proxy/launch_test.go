@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -103,6 +104,7 @@ func newTestLauncher(t *testing.T, fake *fakeManagement) (*launcher, *strings.Bu
 		candidates: func() []string { return []string{server.URL} },
 		stderr:     &stderr,
 		client:     &http.Client{Timeout: 5 * time.Second},
+		stateDir:   t.TempDir(),
 		spawn: func(string, string) (<-chan error, string, error) {
 			spawned++
 			fake.up.Store(true)
@@ -141,7 +143,8 @@ func TestLaunchReusesRunningServer(t *testing.T) {
 		t.Errorf("spawned %d, logins %d; want neither", *spawned, fake.logins)
 	}
 	if ran.name != "claude" || !slices.Equal(ran.args, []string{"--resume", "-p", "hi"}) ||
-		!slices.Contains(ran.env, "ANTHROPIC_BASE_URL=http://127.0.0.1:20999") {
+		!slices.Contains(ran.env, "ANTHROPIC_BASE_URL=http://127.0.0.1:20999") ||
+		!slices.Contains(ran.env, "CLAUDE_CONFIG_DIR="+filepath.Join(launcher.stateDir, "clients", "claude")) {
 		t.Errorf("ran %s %v", ran.name, ran.args)
 	}
 	if ran.attached != 1 {

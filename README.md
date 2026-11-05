@@ -49,6 +49,7 @@ CGO_ENABLED=0 go build -o "$HOME/.local/bin/rute" ./cmd/proxy
 | Credential bundle (`-credential-store=file`) | `<state>/credentials.json` | same |
 | Account manifest (`-credential-store=keyring`) | `<state>/accounts.json` | same |
 | Refresh tokens and API keys (`-credential-store=keyring`) | Keychain services `rute/codex`, `rute/claude`, and `rute/commandcode` | Secret Service, same service names |
+| Client homes (`rute claude`, `rute codex`, `rute cmd`) | `<state>/clients/claude/`, `<state>/clients/codex/`, `<state>/clients/cmd/` | same |
 | Credential audit log | `<credentials.json or accounts.json>.audit.jsonl` | same |
 | Call counters for the dashboard and usage | `<state>/metrics.db` | same |
 | Estimated prices (`-prices`) | `<state>/prices.json`, created by you | same |
@@ -82,9 +83,12 @@ rute cmd
 
 Every argument after `rute claude`, `rute codex`, or `rute cmd` goes to the
 client, so `rute codex --yolo` and `rute claude --resume` work. A leading `--`
-is dropped, as in `rute codex -- --yolo`. `rute cmd` registers rute as a
-Command Code BYOK provider; see
-[Running the Command Code CLI through rute](#running-the-command-code-cli-through-rute).
+is dropped, as in `rute codex -- --yolo`.
+
+Each launcher gives the client an isolated home under rute's state directory —
+`clients/claude`, `clients/codex`, and `clients/cmd` — configured to send
+everything through rute. Your normal `claude`, `codex`, and `cmd` setups are
+untouched; run those directly to use their default homes.
 
 The command:
 
@@ -770,29 +774,35 @@ pasted there too; use the CLI for scripted provisioning.
 
 ### Running the Command Code CLI through rute
 
-`rute cmd` starts a background rute when needed, registers rute as a BYOK
-provider in `~/.commandcode/providers.json` when it is absent, and runs `cmd`
-with the remaining arguments:
+`rute cmd` starts a background rute when needed, prepares an isolated Command
+Code home under `<state>/clients/cmd`, registers rute there as a BYOK provider,
+and runs `cmd` with the remaining arguments:
 
 ```sh
 rute cmd
-rute cmd -m rute/gpt-5.6-sol
+rute cmd -m rute/commandcode/deepseek/deepseek-v4-flash
 ```
 
-The `rute` entry points the CLI at the local proxy with a keyless endpoint
-(`apiKey: false`), so its models appear under `rute/` in `/model`. The entry is
-rewritten on every run because the background rute picks a free port, so its
-`baseURL` and model list follow the running daemon; models you add to the entry
-yourself are kept. An existing entry, and every other provider in the file, is
-preserved.
+The prepared home keeps the session on rute:
 
-When the Command Code pool is empty, `rute cmd` first reuses the key `cmd`
-already signed in with (`~/.commandcode/auth.json`) as a `commandcode` account,
-so you do not sign in twice. If there is no such key and rute has no accounts at
-all, it runs the browser login; if rute has other accounts, it prints a hint and
-continues. The models offered are those rute reports on `/v1/models` — the
-default model plus any `-models-file` aliases — so pick a `rute/<model>` entry
-in `/model`.
+- `HOME` points at the prepared home, so `~/.commandcode` (your login, plan, and
+  providers) is not used;
+- the `rute` provider is registered with a keyless endpoint (`apiKey: false`)
+  and the models rute can serve, including Command Code's own models under
+  `commandcode/<model>`; and
+- `cmd` runs with `--local-only`, so the Command Code backend is disabled and
+  requests cannot fall through to your plan. Unless you pass `-m`, the session
+  starts on the model `cmd` was already configured with when rute offers it.
+
+Because `cmd` has no config-directory flag, isolating it means overriding
+`HOME`, so tools the agent runs (git, ssh, gh) will not see your home-dotfile
+configuration. `rute claude` and `rute codex` are isolated with
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME` instead, which leaves `HOME` alone.
+
+When the Command Code pool is empty, `rute cmd` imports the key `cmd` already
+signed in with (`~/.commandcode/auth.json`) as a `commandcode` account named
+`default`, so you do not sign in twice; if there is no key and rute has no
+accounts at all, it runs the browser login.
 
 ### Supplying credentials non-interactively
 

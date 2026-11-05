@@ -108,7 +108,22 @@ func (launcher *launcher) launch(ctx context.Context, provider string, args []st
 	if proxyURL == "" {
 		proxyURL = "http://" + defaultListenAddress
 	}
-	return launcher.run(ctx, name, clientArgs(provider, proxyURL, args), clientEnv(provider, proxyURL))
+	home, err := launcher.clientHome(provider)
+	if err != nil {
+		return err
+	}
+	return launcher.run(ctx, name, clientArgs(provider, proxyURL, args), clientEnv(provider, proxyURL, home))
+}
+
+// clientHome returns the isolated config directory rute gives a client, so the
+// client's own home stays untouched and its default provider/credentials are
+// not used.
+func (launcher *launcher) clientHome(client string) (string, error) {
+	dir := filepath.Join(launcher.stateDir, "clients", client)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create %s home: %w", client, err)
+	}
+	return dir, nil
 }
 
 func clientName(provider string) (string, error) {
@@ -136,14 +151,23 @@ func clientArgs(provider, proxyURL string, args []string) []string {
 	return append(overrides, args...)
 }
 
-func clientEnv(provider, proxyURL string) []string {
+func clientEnv(provider, proxyURL, home string) []string {
 	env := os.Environ()
 	switch provider {
 	case accountstore.ProviderClaude:
-		env = append(env, "ANTHROPIC_BASE_URL="+proxyURL)
+		env = append(env,
+			"ANTHROPIC_BASE_URL="+proxyURL,
+			// A placeholder credential: rute replaces it with the account's
+			// token, and Claude Code then skips its own login prompt.
+			"ANTHROPIC_AUTH_TOKEN=rute",
+			"CLAUDE_CONFIG_DIR="+home,
+		)
 	case accountstore.ProviderCodex:
-		// Codex requires a provider key; rute ignores it.
-		env = append(env, "RUTE_DOWNSTREAM_KEY=rute")
+		env = append(env,
+			"CODEX_HOME="+home,
+			// Codex requires a provider key; rute ignores it.
+			"RUTE_DOWNSTREAM_KEY=rute",
+		)
 	}
 	return env
 }

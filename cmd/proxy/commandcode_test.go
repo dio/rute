@@ -14,7 +14,7 @@ import (
 )
 
 func TestRunLaunchCommandCodeSignsInWhenNoAccounts(t *testing.T) {
-	// Not parallel: it swaps the package-level providers path.
+	// Not parallel: it swaps the package-level auth/config paths.
 	models := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/models" {
 			t.Errorf("path = %q", request.URL.Path)
@@ -24,16 +24,16 @@ func TestRunLaunchCommandCodeSignsInWhenNoAccounts(t *testing.T) {
 	}))
 	defer models.Close()
 
-	providersPath := filepath.Join(t.TempDir(), ".commandcode", "providers.json")
-	previous := commandCodeProvidersFile
-	commandCodeProvidersFile = func() (string, error) { return providersPath, nil }
-	t.Cleanup(func() { commandCodeProvidersFile = previous })
-
-	// No cmd auth file, so the launcher falls back to the browser login.
+	// No cmd auth/config files, so the launcher falls back to the browser login
+	// and picks the only registered model.
 	authPath := filepath.Join(t.TempDir(), "auth.json")
 	previousAuth := commandCodeAuthFile
 	commandCodeAuthFile = func() (string, error) { return authPath, nil }
 	t.Cleanup(func() { commandCodeAuthFile = previousAuth })
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	previousConfig := commandCodeConfigFile
+	commandCodeConfigFile = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { commandCodeConfigFile = previousConfig })
 
 	fake := &fakeManagement{t: t, proxyURL: models.URL}
 	launcher, stderr, ran, spawned := newTestLauncher(t, fake)
@@ -47,15 +47,66 @@ func TestRunLaunchCommandCodeSignsInWhenNoAccounts(t *testing.T) {
 	if !strings.Contains(stderr.String(), "signing in to Command Code first") {
 		t.Errorf("stderr missing the sign-in notice:\n%s", stderr)
 	}
-	if ran.name != "cmd" || !slices.Equal(ran.args, []string{"--yolo", "--trust"}) {
-		t.Errorf("ran %s %v", ran.name, ran.args)
+	want := []string{"--local-only", "-m", "rute/gpt-5.6-sol", "--yolo", "--trust"}
+	if ran.name != "cmd" || !slices.Equal(ran.args, want) {
+		t.Errorf("ran %s %v, want %v", ran.name, ran.args, want)
 	}
-	body, err := os.ReadFile(providersPath)
+	home := filepath.Join(launcher.stateDir, "clients", "cmd")
+	if !slices.Contains(ran.env, "HOME="+home) {
+		t.Errorf("cmd did not run with rute's home; env = %v", ran.env)
+	}
+	body, err := os.ReadFile(filepath.Join(home, ".commandcode", "providers.json"))
 	if err != nil {
 		t.Fatalf("read providers: %v", err)
 	}
-	if !strings.Contains(string(body), `"rute"`) {
+	if !strings.Contains(string(body), `"rute"`) || !strings.Contains(string(body), "gpt-5.6-sol") {
 		t.Errorf("providers.json was not written:\n%s", body)
+	}
+}
+
+func TestCommandCodeArgs(t *testing.T) {
+	t.Parallel()
+	got := commandCodeArgs([]string{"--yolo"}, "rute/gpt-5.6-sol")
+	want := []string{"--local-only", "-m", "rute/gpt-5.6-sol", "--yolo"}
+	if !slices.Equal(got, want) {
+		t.Errorf("args = %v, want %v", got, want)
+	}
+	// A user's model and an existing --local-only are left alone.
+	got = commandCodeArgs([]string{"--local-only", "-m", "rute/x"}, "rute/gpt-5.6-sol")
+	if !slices.Equal(got, []string{"--local-only", "-m", "rute/x"}) {
+		t.Errorf("args = %v", got)
+	}
+}
+
+func TestPickCommandCodeModel(t *testing.T) {
+	// Not parallel: it swaps the package-level config path.
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"model":"deepseek/deepseek-v4-flash"}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	previous := commandCodeConfigFile
+	commandCodeConfigFile = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { commandCodeConfigFile = previous })
+
+	models := map[string]any{
+		"gpt-5.6-sol":                            struct{}{},
+		"commandcode/claude-sonnet-5":            struct{}{},
+		"commandcode/deepseek/deepseek-v4-flash": struct{}{},
+	}
+	if got := pickCommandCodeModel(models); got != "rute/commandcode/deepseek/deepseek-v4-flash" {
+		t.Errorf("picked %q, want the model cmd already used", got)
+	}
+	commandCodeConfigFile = func() (string, error) {
+		return filepath.Join(t.TempDir(), "missing.json"), nil
+	}
+	if got := pickCommandCodeModel(models); got != "rute/commandcode/claude-sonnet-5" {
+		t.Errorf("picked %q, want a commandcode model", got)
+	}
+	if got := pickCommandCodeModel(map[string]any{"gpt-5.6-sol": struct{}{}}); got != "rute/gpt-5.6-sol" {
+		t.Errorf("picked %q, want the only model", got)
+	}
+	if got := pickCommandCodeModel(map[string]any{}); got != "" {
+		t.Errorf("picked %q, want empty", got)
 	}
 }
 
