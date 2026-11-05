@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -191,6 +192,64 @@ func TestLaunchReportsServerThatExits(t *testing.T) {
 	err := launcher.launch(context.Background(), "claude", nil)
 	if err == nil || !strings.Contains(err.Error(), "/state/rute.log") {
 		t.Errorf("launch error = %v, want the log path", err)
+	}
+}
+
+func TestClientHomeLinksUserConfigForCommandCode(t *testing.T) {
+	// Not parallel: it swaps the package-level home resolver.
+	realHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realHome, ".gitconfig"), []byte("[user]\n"), 0o600); err != nil {
+		t.Fatalf("write gitconfig: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(realHome, ".ssh"), 0o700); err != nil {
+		t.Fatalf("create ssh dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(realHome, ".commandcode"), 0o700); err != nil {
+		t.Fatalf("create commandcode dir: %v", err)
+	}
+	previous := userHomeDir
+	userHomeDir = func() (string, error) { return realHome, nil }
+	t.Cleanup(func() { userHomeDir = previous })
+
+	launcher := &launcher{stateDir: t.TempDir()}
+	dir, err := launcher.clientHome("cmd")
+	if err != nil {
+		t.Fatalf("client home: %v", err)
+	}
+	for _, name := range []string{".gitconfig", ".ssh"} {
+		target := filepath.Join(dir, name)
+		info, err := os.Lstat(target)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s is not a symlink", name)
+			continue
+		}
+		link, err := os.Readlink(target)
+		if err != nil {
+			t.Fatalf("readlink %s: %v", name, err)
+		}
+		if link != filepath.Join(realHome, name) {
+			t.Errorf("%s -> %q", name, link)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".commandcode")); err == nil {
+		t.Error("the client config directory must not be linked")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".netrc")); err == nil {
+		t.Error("an entry that does not exist was linked")
+	}
+	if _, err := launcher.clientHome("cmd"); err != nil {
+		t.Fatalf("second client home: %v", err)
+	}
+
+	claudeDir, err := launcher.clientHome("claude")
+	if err != nil {
+		t.Fatalf("claude home: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(claudeDir, ".gitconfig")); err == nil {
+		t.Error("other clients' homes must not be linked")
 	}
 }
 

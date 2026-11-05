@@ -795,9 +795,12 @@ The prepared home keeps the session on rute:
   starts on the model `cmd` was already configured with when rute offers it.
 
 Because `cmd` has no config-directory flag, isolating it means overriding
-`HOME`, so tools the agent runs (git, ssh, gh) will not see your home-dotfile
-configuration. `rute claude` and `rute codex` are isolated with
-`CLAUDE_CONFIG_DIR` and `CODEX_HOME` instead, which leaves `HOME` alone.
+`HOME`. To keep the tools the agent runs working, rute symlinks your
+`.gitconfig`, `.gitignore`, `.git-credentials`, `.config/git`, `.config/gh`,
+`.ssh`, `.netrc`, `.npmrc`, `.gnupg`, `.docker`, `.aws`, and `.kube` into the
+prepared home when they exist; `.commandcode` itself is never linked.
+`rute claude` and `rute codex` are isolated with `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` instead, which leaves `HOME` alone.
 
 When the Command Code pool is empty, `rute cmd` imports the key `cmd` already
 signed in with (`~/.commandcode/auth.json`) as a `commandcode` account named
