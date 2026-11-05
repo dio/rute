@@ -12,8 +12,11 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -166,57 +169,206 @@ type result struct {
 	err         error
 }
 
-func callbackHandler(
-	state string,
-	complete func(result),
-) http.Handler {
+// callbackOrigins are the Studio origins the callback answers, matching the
+// CLI's own allowlist.
+var callbackOrigins = map[string]bool{
+	"http://localhost:3000":          true,
+	"https://staging.commandcode.ai": true,
+	"https://commandcode.ai":         true,
+}
+
+const maxCallbackBody = 64 << 10
+
+// callbackPayload is the JSON body the Studio posts to the callback.
+type callbackPayload struct {
+	APIKey           string `json:"apiKey"`
+	State            string `json:"state"`
+	UserID           string `json:"userId"`
+	UserName         string `json:"userName"`
+	KeyName          string `json:"keyName"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+}
+
+// callbackHandler serves the Studio's callback. The Studio posts the result as
+// JSON from its own page (a cross-origin request, so CORS is required); the
+// query-string GET form is kept as a fallback for redirect-style handoffs.
+func callbackHandler(state string, complete func(result)) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(commandcode.CallbackPath, func(writer http.ResponseWriter, request *http.Request) {
-		query := request.URL.Query()
-		if !constantTimeEqual(query.Get("state"), state) {
-			writeCallbackPage(writer, http.StatusForbidden, "Authorization failed",
-				"The state token did not match this login attempt. Open the URL rute printed, "+
-					"or start a new login.")
-			// A callback that carries a result belongs to a different login
-			// attempt, so fail now instead of waiting out the timeout. A bare
-			// request (a probe or prefetch) is ignored so it cannot abort a
-			// login that is still in progress.
-			if query.Get("apiKey") != "" || query.Get("error") != "" {
-				complete(result{err: errors.New(
-					"commandcodeauth: the callback did not match this login attempt; " +
-						"open the URL rute printed, or start a new login",
-				)})
-			}
-			return
+		writeCallbackCORS(writer, request)
+		switch request.Method {
+		case http.MethodOptions:
+			writer.WriteHeader(http.StatusNoContent)
+		case http.MethodPost:
+			handlePostedCallback(writer, request, state, complete)
+		case http.MethodGet:
+			handleBrowserCallback(writer, request, state, complete)
+		default:
+			writer.Header().Set("Allow", "GET, POST, OPTIONS")
+			writer.WriteHeader(http.StatusMethodNotAllowed)
 		}
-		if code := query.Get("error"); code != "" {
-			writeCallbackPage(writer, http.StatusOK, "Authorization denied",
-				"Command Code was not authorized. No API key was created.")
-			transport := strings.TrimSpace(query.Get("error_description"))
-			if transport == "" {
-				transport = code
-			}
-			complete(result{err: fmt.Errorf("commandcodeauth: %s", transport)})
-			return
-		}
-		apiKey := query.Get("apiKey")
-		if apiKey == "" {
-			writeCallbackPage(writer, http.StatusBadRequest, "Authorization failed",
-				"The callback did not include an API key.")
-			complete(result{err: errors.New("commandcodeauth: callback omitted the API key")})
-			return
-		}
-		writeCallbackPage(writer, http.StatusOK, "Authenticated",
-			"You can close this window and return to rute.")
-		complete(result{credentials: Credentials{
-			APIKey:          apiKey,
-			UserID:          query.Get("userId"),
-			UserName:        query.Get("userName"),
-			KeyName:         query.Get("keyName"),
-			AuthenticatedAt: time.Now().UTC(),
-		}})
 	})
 	return mux
+}
+
+func writeCallbackCORS(writer http.ResponseWriter, request *http.Request) {
+	origin := request.Header.Get("Origin")
+	if !callbackOrigins[origin] {
+		origin = "http://localhost:3000"
+	}
+	writer.Header().Set("Access-Control-Allow-Origin", origin)
+	writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	// Chrome's Private Network Access preflight needs this to allow a public
+	// page to reach a loopback server.
+	writer.Header().Set("Access-Control-Allow-Private-Network", "true")
+	writer.Header().Set("Vary", "Origin")
+}
+
+func handlePostedCallback(
+	writer http.ResponseWriter,
+	request *http.Request,
+	state string,
+	complete func(result),
+) {
+	mediaType, _, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if mediaType != "application/json" && mediaType != "application/x-www-form-urlencoded" {
+		writeCallbackJSON(writer, http.StatusUnsupportedMediaType, false, "unsupported content type")
+		return
+	}
+	payload, err := readCallbackPayload(request, mediaType)
+	if err != nil {
+		writeCallbackJSON(writer, http.StatusBadRequest, false, err.Error())
+		return
+	}
+	if !constantTimeEqual(payload.State, state) {
+		writeCallbackJSON(writer, http.StatusForbidden, false, "invalid state token")
+		complete(result{err: errors.New(
+			"commandcodeauth: the callback did not match this login attempt; " +
+				"open the URL rute printed, or start a new login",
+		)})
+		return
+	}
+	if payload.Error != "" {
+		writeCallbackJSON(writer, http.StatusOK, true, "")
+		message := strings.TrimSpace(payload.ErrorDescription)
+		if message == "" {
+			message = payload.Error
+		}
+		complete(result{err: fmt.Errorf("commandcodeauth: %s", message)})
+		return
+	}
+	if payload.APIKey == "" {
+		writeCallbackJSON(writer, http.StatusBadRequest, false, "missing required fields")
+		complete(result{err: errors.New("commandcodeauth: callback omitted the API key")})
+		return
+	}
+	writeCallbackJSON(writer, http.StatusOK, true, "")
+	complete(result{credentials: Credentials{
+		APIKey:          payload.APIKey,
+		UserID:          payload.UserID,
+		UserName:        payload.UserName,
+		KeyName:         payload.KeyName,
+		AuthenticatedAt: time.Now().UTC(),
+	}})
+}
+
+func readCallbackPayload(
+	request *http.Request,
+	mediaType string,
+) (callbackPayload, error) {
+	if mediaType == "application/x-www-form-urlencoded" {
+		if err := request.ParseForm(); err != nil {
+			return callbackPayload{}, errors.New("invalid form body")
+		}
+		return callbackPayload{
+			APIKey:   request.PostFormValue("apiKey"),
+			State:    request.PostFormValue("state"),
+			UserID:   request.PostFormValue("userId"),
+			UserName: request.PostFormValue("userName"),
+			KeyName:  request.PostFormValue("keyName"),
+		}, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maxCallbackBody+1))
+	if err != nil {
+		return callbackPayload{}, errors.New("could not read the request body")
+	}
+	if len(body) > maxCallbackBody {
+		return callbackPayload{}, errors.New("request body is too large")
+	}
+	var payload callbackPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return callbackPayload{}, errors.New("invalid JSON body")
+	}
+	return payload, nil
+}
+
+// handleBrowserCallback answers a GET callback, which some handoffs use with
+// query parameters. A bare request (a probe, or a page opened directly) does
+// not complete the login.
+func handleBrowserCallback(
+	writer http.ResponseWriter,
+	request *http.Request,
+	state string,
+	complete func(result),
+) {
+	query := request.URL.Query()
+	if query.Get("state") == "" && query.Get("apiKey") == "" && query.Get("error") == "" {
+		writeCallbackPage(writer, http.StatusMethodNotAllowed, "Return to your terminal",
+			"This page completes login automatically during sign-in. Start a new login from rute "+
+				"if you reached it directly.")
+		return
+	}
+	if !constantTimeEqual(query.Get("state"), state) {
+		writeCallbackPage(writer, http.StatusForbidden, "Authorization failed",
+			"The state token did not match this login attempt. Open the URL rute printed, "+
+				"or start a new login.")
+		if query.Get("apiKey") != "" || query.Get("error") != "" {
+			complete(result{err: errors.New(
+				"commandcodeauth: the callback did not match this login attempt; " +
+					"open the URL rute printed, or start a new login",
+			)})
+		}
+		return
+	}
+	if code := query.Get("error"); code != "" {
+		writeCallbackPage(writer, http.StatusOK, "Authorization denied",
+			"Command Code was not authorized. No API key was created.")
+		transport := strings.TrimSpace(query.Get("error_description"))
+		if transport == "" {
+			transport = code
+		}
+		complete(result{err: fmt.Errorf("commandcodeauth: %s", transport)})
+		return
+	}
+	apiKey := query.Get("apiKey")
+	if apiKey == "" {
+		writeCallbackPage(writer, http.StatusBadRequest, "Authorization failed",
+			"The callback did not include an API key.")
+		complete(result{err: errors.New("commandcodeauth: callback omitted the API key")})
+		return
+	}
+	writeCallbackPage(writer, http.StatusOK, "Authenticated",
+		"You can close this window and return to rute.")
+	complete(result{credentials: Credentials{
+		APIKey:          apiKey,
+		UserID:          query.Get("userId"),
+		UserName:        query.Get("userName"),
+		KeyName:         query.Get("keyName"),
+		AuthenticatedAt: time.Now().UTC(),
+	}})
+}
+
+func writeCallbackJSON(writer http.ResponseWriter, status int, success bool, message string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(status)
+	body := map[string]any{"success": success}
+	if message != "" {
+		body["error"] = message
+	}
+	_ = json.NewEncoder(writer).Encode(body)
 }
 
 func writeCallbackPage(writer http.ResponseWriter, status int, heading, detail string) {

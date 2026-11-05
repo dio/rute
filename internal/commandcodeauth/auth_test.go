@@ -2,6 +2,7 @@ package commandcodeauth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,23 @@ import (
 	"testing"
 	"time"
 )
+
+// postCallback simulates the Studio: its page posts the result to the loopback
+// callback as JSON, from the Studio origin.
+func postCallback(t *testing.T, callback, body string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, callback, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new callback request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://commandcode.ai")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("post callback: %v", err)
+	}
+	return response
+}
 
 func TestAuthenticateReturnsProvisionedCredentials(t *testing.T) {
 	t.Parallel()
@@ -26,11 +44,10 @@ func TestAuthenticateReturnsProvisionedCredentials(t *testing.T) {
 			}
 			callback := parsed.Query().Get("callback")
 			state := parsed.Query().Get("state")
-			response, err := http.Get(callback + "?apiKey=key-123&state=" +
-				url.QueryEscape(state) + "&userId=user-1&userName=alice&keyName=laptop")
-			if err != nil {
-				return err
-			}
+			response := postCallback(t, callback, fmt.Sprintf(
+				`{"apiKey":"key-123","state":%q,"userId":"user-1","userName":"alice","keyName":"laptop"}`,
+				state,
+			))
 			return response.Body.Close()
 		},
 	})
@@ -68,11 +85,10 @@ func TestAuthenticateReportsDenial(t *testing.T) {
 			parsed, _ := url.Parse(value)
 			callback := parsed.Query().Get("callback")
 			state := parsed.Query().Get("state")
-			response, requestErr := http.Get(callback + "?error=access_denied&state=" +
-				url.QueryEscape(state) + "&error_description=denied+by+user")
-			if requestErr != nil {
-				return requestErr
-			}
+			response := postCallback(t, callback, fmt.Sprintf(
+				`{"error":"access_denied","error_description":"denied by user","state":%q}`,
+				state,
+			))
 			return response.Body.Close()
 		},
 	})
@@ -81,17 +97,70 @@ func TestAuthenticateReportsDenial(t *testing.T) {
 	}
 }
 
+func TestCallbackPostsResultWithCORS(t *testing.T) {
+	t.Parallel()
+	completed := make(chan result, 1)
+	handler := callbackHandler("expected-state", func(value result) { completed <- value })
+
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/callback",
+		strings.NewReader(`{"apiKey":"key-123","state":"expected-state",`+
+			`"userId":"user-1","userName":"alice","keyName":"laptop"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://commandcode.ai")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	if !strings.Contains(recorder.Body.String(), `"success":true`) {
+		t.Errorf("body = %s", recorder.Body)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "https://commandcode.ai" {
+		t.Errorf("allow-origin = %q", got)
+	}
+	select {
+	case value := <-completed:
+		if value.err != nil || value.credentials.APIKey != "key-123" {
+			t.Errorf("completion = %+v", value)
+		}
+	default:
+		t.Fatal("posted callback did not complete the login")
+	}
+}
+
+func TestCallbackAnswersPreflight(t *testing.T) {
+	t.Parallel()
+	handler := callbackHandler("expected-state", func(result) {})
+	request := httptest.NewRequest(http.MethodOptions, "http://127.0.0.1/callback", nil)
+	request.Header.Set("Origin", "https://commandcode.ai")
+	request.Header.Set("Access-Control-Request-Private-Network", "true")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	for header, want := range map[string]string{
+		"Access-Control-Allow-Origin":          "https://commandcode.ai",
+		"Access-Control-Allow-Methods":         "GET, POST, OPTIONS",
+		"Access-Control-Allow-Headers":         "Content-Type",
+		"Access-Control-Allow-Private-Network": "true",
+	} {
+		if got := recorder.Header().Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+}
+
 func TestCallbackRejectsMismatchedState(t *testing.T) {
 	t.Parallel()
 
-	// A callback carrying a result belongs to another attempt: fail now.
+	// A posted result for another attempt fails the login immediately.
 	completed := make(chan result, 1)
 	handler := callbackHandler("expected-state", func(value result) { completed <- value })
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"http://127.0.0.1/callback?apiKey=key&state=wrong",
-		nil,
-	)
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/callback",
+		strings.NewReader(`{"apiKey":"key","state":"wrong"}`))
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
@@ -106,14 +175,14 @@ func TestCallbackRejectsMismatchedState(t *testing.T) {
 		t.Fatal("mismatched callback did not complete the login")
 	}
 
-	// A bare request must not abort a login that is still in progress.
+	// A bare GET must not abort a login that is still in progress.
 	bare := make(chan result, 1)
 	handler = callbackHandler("expected-state", func(value result) { bare <- value })
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(
 		http.MethodGet, "http://127.0.0.1/callback", nil,
 	))
-	if recorder.Code != http.StatusForbidden {
+	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("bare status = %d", recorder.Code)
 	}
 	select {
