@@ -11,6 +11,52 @@ import (
 	"github.com/dio/rute/internal/latency"
 )
 
+func TestSummarySkipsCallsWithoutAnAccount(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now()
+	for _, record := range []latency.Record{
+		{Time: now, Provider: "codex", Account: "", Model: "gpt", InFlight: 1,
+			Status: 429, Outcome: latency.OutcomeRateLimited},
+		{Time: now, Provider: "codex", Account: "default", Model: "gpt", InFlight: 1,
+			Outcome: latency.OutcomeOK},
+	} {
+		if err := store.Write(record); err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+	}
+
+	rows, err := store.Summary(context.Background(), now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	calls := int64(0)
+	for _, row := range rows {
+		if row.Account == "" {
+			t.Errorf("summary kept a call with no account: %+v", row)
+		}
+		calls += row.Calls
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+
+	usage, err := store.Usage(context.Background(), now.Add(-time.Hour), 24*time.Hour)
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	for _, row := range usage {
+		if row.Account == "" {
+			t.Errorf("usage kept a call with no account: %+v", row)
+		}
+	}
+}
+
 func TestStoreAggregatesFlushesAndPrunes(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metrics.db")
@@ -105,7 +151,7 @@ func TestStoreAggregatesFlushesAndPrunes(t *testing.T) {
 		t.Errorf("recent = %+v", recent)
 	}
 
-	// Counters survive reopening; individual calls do not.
+	// Counters and recent calls survive reopening.
 	if err := store.Write(calls[2]); err != nil {
 		t.Fatal(err)
 	}
@@ -124,8 +170,8 @@ func TestStoreAggregatesFlushesAndPrunes(t *testing.T) {
 	if summary[0].Calls != 4 {
 		t.Errorf("after reopen = %+v", summary[0])
 	}
-	if got := reopened.Recent(10); len(got) != 0 {
-		t.Errorf("recent calls persisted: %+v", got)
+	if got := reopened.Recent(10); len(got) != 6 || got[0].InFlight != 3 {
+		t.Errorf("recent after reopen = %+v", got)
 	}
 }
 

@@ -51,7 +51,7 @@ CGO_ENABLED=0 go build -o "$HOME/.local/bin/rute" ./cmd/proxy
 | Refresh tokens and API keys (`-credential-store=keyring`) | Keychain services `rute/codex`, `rute/claude`, and `rute/commandcode` | Secret Service, same service names |
 | Client homes (`rute claude`, `rute codex`, `rute cmd`) | `<state>/clients/claude/`, `<state>/clients/codex/`, `<state>/clients/cmd/` | same |
 | Credential audit log | `<credentials.json or accounts.json>.audit.jsonl` | same |
-| Call counters for the dashboard and usage | `<state>/metrics.db` | same |
+| Call counters and the newest 500 calls for the dashboard and usage | `<state>/metrics.db` | same |
 | Estimated prices (`-prices`) | `<state>/prices.json`, created by you | same |
 | Routing saved from the dashboard | `<state>/routing.json` | same |
 | Running server's URLs and process | `<state>/server.json`, with the lock `<state>/server.lock` | same |
@@ -521,8 +521,8 @@ estimates from the histograms.
 Counters are written every 10 seconds and kept for 30 days
 (`-metrics-retention`). `-metrics-db=PATH` moves the file and
 `-metrics-db=off` disables it. `rute stats` without file arguments reads the
-same database. The dashboard's recent-calls list holds the last 1000 calls in
-memory and starts empty after a restart. For per-call records, use
+same database. The dashboard's recent-calls list keeps the newest 500 calls in
+`metrics.db`, so it survives a restart. For per-call records, use
 `-metrics-file`.
 
 ### Measuring latency under concurrency

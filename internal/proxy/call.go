@@ -67,6 +67,10 @@ func (call *upstreamCall) release() {
 // fail releases the lease and records a call that produced no response.
 func (call *upstreamCall) fail(err error) {
 	call.release()
+	// No account was ever selected, so there is no per-account call to record.
+	if call.record.Account == "" {
+		return
+	}
 	var unavailable *codexpool.UnavailableError
 	switch {
 	case call.ctx.Err() != nil:

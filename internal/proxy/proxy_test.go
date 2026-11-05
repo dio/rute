@@ -15,8 +15,59 @@ import (
 	"github.com/dio/rute/internal/accountstore"
 	"github.com/dio/rute/internal/codexauth"
 	"github.com/dio/rute/internal/codexpool"
+	"github.com/dio/rute/internal/latency"
 	"github.com/dio/rute/oauthpkce"
 )
+
+type recordSink struct {
+	mu      sync.Mutex
+	records []latency.Record
+}
+
+func (sink *recordSink) Write(record latency.Record) error {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.records = append(sink.records, record)
+	return nil
+}
+
+func (sink *recordSink) len() int {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	return len(sink.records)
+}
+
+func TestCallsWithoutAnAccountAreNotRecorded(t *testing.T) {
+	t.Parallel()
+	pool, err := codexpool.New(
+		context.Background(),
+		accountstore.NewMemoryStore(),
+		codexauth.Config{ClientID: "client", TokenURL: "https://example.invalid/token"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	sink := &recordSink{}
+	handler, err := New(Config{
+		UpstreamURL:  "http://127.0.0.1:1",
+		DefaultModel: "gpt-test",
+		Metrics:      sink,
+	}, pool)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		strings.NewReader(`{"input":"ping"}`))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if got := sink.len(); got != 0 {
+		t.Errorf("recorded %d calls that never acquired an account", got)
+	}
+}
 
 type staticCredentials struct {
 	mu           sync.Mutex
