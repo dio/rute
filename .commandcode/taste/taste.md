@@ -1,0 +1,3 @@
+- Never add coding-agent signature or co-author trailers (e.g. `Co-authored-by: CommandCodeBot`) to git commits. Confidence: 0.95
+- Expects shipped features to be fully documented (README plus docs/*.md, flag/endpoint lists kept accurate), and asks for docs to be brought up to date rather than leaving them stale. Confidence: 0.5
+- For rute's client launchers (`rute claude`, `rute codex`, `rute cmd`), every request must be forced through rute (point the client's base URL/provider at the proxy) and the client must run against a rute-prepared isolated home rather than its own default home; invoking the clients directly keeps their normal defaults. Confidence: 0.7

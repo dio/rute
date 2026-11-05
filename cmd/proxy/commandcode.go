@@ -418,6 +418,9 @@ func ruteModelEntries(
 		if model.DisplayName != "" {
 			entry["name"] = model.DisplayName
 		}
+		if efforts := ruteReasoningEfforts(model.OwnedBy); efforts != nil {
+			entry["reasoningEfforts"] = efforts
+		}
 		entries[model.ID] = entry
 	}
 	return entries
@@ -446,9 +449,25 @@ func catalogModelEntries(models []commandCodeModel, proxyURL string) map[string]
 		if model.ContextLength > 0 {
 			entry["contextWindow"] = model.ContextLength
 		}
+		if wire == "openai-responses" {
+			entry["reasoningEfforts"] = []string{"low", "medium", "high"}
+		}
 		entries[accountstore.ProviderCommandCode+"/"+model.ID] = entry
 	}
 	return entries
+}
+
+// ruteReasoningEfforts lists the efforts Command Code may offer for a model
+// that rute serves from provider. Command Code enables /effort only for models
+// that declare a list. Codex maps "max" to "xhigh", so it is not listed.
+func ruteReasoningEfforts(provider string) []string {
+	switch provider {
+	case accountstore.ProviderCodex:
+		return []string{"low", "medium", "high", "xhigh"}
+	case accountstore.ProviderClaude:
+		return []string{"low", "medium", "high", "xhigh", "max"}
+	}
+	return nil
 }
 
 // wire picks the wire for a Command Code model from the endpoints it serves.

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -263,5 +264,37 @@ func TestImportCommandCodeKeyFromCmdAuthFile(t *testing.T) {
 	imported, err = launcher.importCommandCodeKey(context.Background())
 	if err != nil || imported {
 		t.Errorf("missing auth file: imported = %v, err = %v", imported, err)
+	}
+}
+
+func TestModelEntriesDeclareReasoningEfforts(t *testing.T) {
+	rute := ruteModelEntries([]commandCodeModel{
+		{ID: "codex/gpt-5.6-sol", OwnedBy: "codex"},
+		{ID: "claude/opus", OwnedBy: "claude"},
+		{ID: "other/model", OwnedBy: "other"},
+	}, "http://127.0.0.1:1", nil)
+	want := map[string][]string{
+		"codex/gpt-5.6-sol": {"low", "medium", "high", "xhigh"},
+		"claude/opus":       {"low", "medium", "high", "xhigh", "max"},
+	}
+	for id, efforts := range want {
+		got, _ := rute[id].(map[string]any)["reasoningEfforts"].([]string)
+		if !reflect.DeepEqual(got, efforts) {
+			t.Errorf("%s reasoningEfforts = %v, want %v", id, got, efforts)
+		}
+	}
+	if _, ok := rute["other/model"].(map[string]any)["reasoningEfforts"]; ok {
+		t.Error("an unknown provider must not declare efforts")
+	}
+
+	catalog := catalogModelEntries([]commandCodeModel{
+		{ID: "a/responses", SupportedEndpoints: []string{"/responses"}},
+		{ID: "b/chat", SupportedEndpoints: []string{"/chat/completions"}},
+	}, "http://127.0.0.1:1")
+	if got, _ := catalog["commandcode/a/responses"].(map[string]any)["reasoningEfforts"].([]string); !reflect.DeepEqual(got, []string{"low", "medium", "high"}) {
+		t.Errorf("responses model reasoningEfforts = %v", got)
+	}
+	if _, ok := catalog["commandcode/b/chat"].(map[string]any)["reasoningEfforts"]; ok {
+		t.Error("a chat-completions model must not declare efforts")
 	}
 }
