@@ -25,6 +25,10 @@ const (
 	ActionRemove = "remove"
 )
 
+// DefaultAccountName names an account added without one, so the first account
+// of a provider needs no name.
+const DefaultAccountName = "default"
+
 // Login states.
 const (
 	LoginPending = "pending"
@@ -204,6 +208,9 @@ func (manager *logins) putKey(provider, name, action, apiKey string) (Login, err
 	if action == ActionRemove {
 		return Login{}, errors.New("remove does not take an API key")
 	}
+	if name == "" && action == ActionAdd {
+		name = DefaultAccountName
+	}
 	pool, err := manager.target(provider, name, action)
 	if err != nil {
 		return Login{}, err
@@ -235,6 +242,9 @@ func (manager *logins) putKey(provider, name, action, apiKey string) (Login, err
 func (manager *logins) begin(provider, name, action string) (Login, error) {
 	if action == ActionRemove {
 		return Login{}, errors.New("remove is not a login action")
+	}
+	if name == "" && action == ActionAdd {
+		name = DefaultAccountName
 	}
 	pool, err := manager.target(provider, name, action)
 	if err != nil {

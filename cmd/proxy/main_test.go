@@ -164,6 +164,30 @@ func TestParseAccountOptionsCommandCode(t *testing.T) {
 	}
 }
 
+func TestParseAccountOptionsDefaultsName(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"add"},
+		{"add", "-provider=claude"},
+		{"add", "-provider=commandcode", "-api-key=k"},
+	} {
+		opts, err := parseAccountOptions(args, new(bytes.Buffer))
+		if err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		if opts.name != "default" {
+			t.Errorf("%v name = %q, want default", args, opts.name)
+		}
+	}
+	if _, err := parseAccountOptions([]string{"reauth"}, new(bytes.Buffer)); err == nil {
+		t.Fatal("reauth without an account name succeeded")
+	}
+	if _, err := parseAccountOptions([]string{"remove"}, new(bytes.Buffer)); err == nil {
+		t.Fatal("remove without an account name succeeded")
+	}
+}
+
 func TestParseAccountOptionsClear(t *testing.T) {
 	t.Parallel()
 

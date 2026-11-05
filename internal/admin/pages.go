@@ -279,11 +279,18 @@ func (server *Server) handleNewAccount(writer http.ResponseWriter, request *http
 	if action != ActionReauth {
 		action = ActionAdd
 	}
+	provider := request.URL.Query().Get("provider")
+	name := strings.TrimSpace(request.URL.Query().Get("name"))
+	// Offer the conventional name for a provider's first account.
+	if name == "" && action == ActionAdd &&
+		validProvider(provider) && server.providerAccountCount(provider) == 0 {
+		name = DefaultAccountName
+	}
 	server.render(writer, "new_account.html", newAccountView{
 		CSRF:      server.csrf,
 		Providers: server.providers(),
-		Provider:  request.URL.Query().Get("provider"),
-		Name:      strings.TrimSpace(request.URL.Query().Get("name")),
+		Provider:  provider,
+		Name:      name,
 		Action:    action,
 	})
 }
@@ -354,6 +361,16 @@ func (server *Server) accountCount() int {
 		total += len(provider.Accounts)
 	}
 	return total
+}
+
+// providerAccountCount counts one provider's accounts.
+func (server *Server) providerAccountCount(name string) int {
+	for _, provider := range server.status().Providers {
+		if provider.Provider == name {
+			return len(provider.Accounts)
+		}
+	}
+	return 0
 }
 
 // handleClearAccountsPage asks for confirmation before removing every account.
