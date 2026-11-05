@@ -53,6 +53,78 @@ func TestStartSessionDispatchesCommandCode(t *testing.T) {
 	}
 }
 
+func TestAddDefaultsToDefaultAccountName(t *testing.T) {
+	t.Parallel()
+
+	pool, err := codexpool.NewProvider(
+		context.Background(),
+		accountstore.NewMemoryStore(),
+		accountstore.ProviderCommandCode,
+		codexauth.Config{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	session := &fakeAPIKeySession{credentials: make(chan commandcodeauth.Credentials, 1)}
+	server, err := New(Config{
+		Version:      "test",
+		Pools:        map[string]*codexpool.Pool{accountstore.ProviderCommandCode: pool},
+		StartSession: func(string) (Pending, error) { return session, nil },
+		LoginTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new admin server: %v", err)
+	}
+	do := func(request *http.Request) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	page := do(httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1:20129/accounts/new?provider=commandcode", nil)).Body.String()
+	if !strings.Contains(page, `value="default"`) {
+		t.Errorf("the add form does not offer the default name:\n%s", page)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:20129/v1/logins",
+		strings.NewReader(`{"provider":"commandcode"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := do(request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("start login = %d: %s", recorder.Code, recorder.Body)
+	}
+	var login Login
+	if err := json.Unmarshal(recorder.Body.Bytes(), &login); err != nil {
+		t.Fatal(err)
+	}
+	if login.Name != "default" {
+		t.Errorf("login name = %q, want default", login.Name)
+	}
+
+	session.credentials <- commandcodeauth.Credentials{APIKey: "key", UserID: "user-1"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		polled := do(httptest.NewRequest(http.MethodGet,
+			"http://127.0.0.1:20129/v1/logins/"+login.ID, nil))
+		if err := json.Unmarshal(polled.Body.Bytes(), &login); err != nil {
+			t.Fatal(err)
+		}
+		if login.State != LoginPending || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if login.State != LoginDone {
+		t.Fatalf("finished login = %+v", login)
+	}
+	accounts := pool.Accounts()
+	if len(accounts) != 1 || accounts[0].Name != "default" {
+		t.Errorf("accounts = %+v", accounts)
+	}
+}
+
 func TestDashboardAddsCommandCodeAPIKeyAccount(t *testing.T) {
 	t.Parallel()
 

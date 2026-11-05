@@ -106,7 +106,8 @@ rute account reauth \
 ```
 
 `account list` shows each account's auth mode, so an API-key account is
-distinguishable from a subscription account.
+distinguishable from a subscription account. Omitting `-name` on `account add`
+names the account `default`.
 
 ## Verify the bundle without exposing secrets
 

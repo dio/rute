@@ -305,6 +305,9 @@ codex     personal  active  acct_...
 claude    personal  active  -
 ```
 
+Omitting `-name` on `account add` names the account `default`, so the first
+account of a provider needs no name.
+
 Use `rute account list -provider=codex` or
 `rute account list -provider=claude` to filter the output. Account names are
 provider-scoped, so the same name can be used once per provider.
@@ -444,7 +447,8 @@ dashboard that refreshes every five seconds and shows:
 actions as `rute account add`, `rute account reauth`, and `rute account
 remove`, and the change joins the running pool without a restart. The add form
 takes an optional API key: paste one to store an API-key account for any
-provider, or leave it blank to authorize in the browser. Each account row shows
+provider, or leave it blank to authorize in the browser. When a provider has no
+accounts yet, the name field is prefilled with `default`. Each account row shows
 its auth mode (`oauth` or `api key`), offers **log in again** for OAuth accounts
 and **replace key** for API-key accounts, and can be removed. A **remove all
 accounts** link clears every provider's accounts after a confirmation page.

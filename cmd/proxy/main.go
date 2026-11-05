@@ -1038,7 +1038,7 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 		providerHelp,
 	)
 	if opts.action == "add" {
-		flags.StringVar(&opts.name, "name", "", "account name")
+		flags.StringVar(&opts.name, "name", "", "account name (default: default)")
 	}
 	if opts.action == "add" || opts.action == "reauth" {
 		flags.DurationVar(
@@ -1106,6 +1106,10 @@ func parseAccountOptions(args []string, stderr io.Writer) (accountOptions, error
 			opts.provider = accountstore.ProviderCodex
 		}
 		opts.name = strings.TrimSpace(opts.name)
+		if opts.name == "" && opts.action == "add" {
+			// Offer the conventional name for a provider's first account.
+			opts.name = admin.DefaultAccountName
+		}
 		if err := accountstore.ValidateName(opts.name); err != nil {
 			return accountOptions{}, err
 		}
