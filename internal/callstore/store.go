@@ -1,11 +1,12 @@
-// Package callstore keeps per-minute call counters in a local SQLite database
-// so status views keep their history across restarts. It aggregates calls as
-// they arrive and never stores individual calls.
+// Package callstore keeps per-minute call counters and the newest individual
+// calls in a local SQLite database, so status views keep their history across
+// restarts. It aggregates calls as they arrive.
 package callstore
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -25,8 +26,9 @@ import (
 const (
 	flushInterval = 10 * time.Second
 	pruneInterval = time.Hour
-	// recentSize is how many individual calls Recent keeps in memory.
-	recentSize = 1000
+	// recentSize is how many individual calls are kept. They are stored in the
+	// database so they survive a restart.
+	recentSize = 500
 )
 
 // InFlightBuckets are the upper bounds of the calls-in-flight ranges.
@@ -58,8 +60,14 @@ CREATE TABLE IF NOT EXISTS minutes (
 	duration_ms   REAL    NOT NULL,
 	wait_hist     TEXT    NOT NULL,
 	rate_hist     TEXT    NOT NULL,
-	PRIMARY KEY (minute, provider, account, model, bucket)
+  PRIMARY KEY (minute, provider, account, model, bucket)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS recent (
+	id     INTEGER PRIMARY KEY AUTOINCREMENT,
+	minute INTEGER NOT NULL,
+	body   TEXT    NOT NULL
+);
 `
 
 // Counters aggregates calls for one provider, account, model, and
@@ -312,8 +320,6 @@ type Store struct {
 
 	mu      sync.Mutex
 	pending map[key]*Counters
-	recent  []latency.Record
-	next    int
 }
 
 // Open opens or creates the database at path with owner-only permissions.
@@ -340,7 +346,7 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, pending: make(map[key]*Counters)}, nil
 }
 
-// Write counts record. It does no disk I/O.
+// Write counts record and keeps it among the newest recentSize calls.
 func (store *Store) Write(record latency.Record) error {
 	_, bucket := latency.BucketLabel(InFlightBuckets, max(1, record.InFlight))
 	id := key{
@@ -351,34 +357,67 @@ func (store *Store) Write(record latency.Record) error {
 		bucket:   bucket,
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	counters := store.pending[id]
 	if counters == nil {
 		counters = newCounters(id)
 		store.pending[id] = counters
 	}
 	counters.add(record)
-	if len(store.recent) < recentSize {
-		store.recent = append(store.recent, record)
-	} else {
-		store.recent[store.next] = record
+	store.mu.Unlock()
+	return store.writeRecent(record)
+}
+
+// writeRecent stores one call and trims the table to the newest recentSize.
+func (store *Store) writeRecent(record latency.Record) error {
+	body, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("callstore: encode recent call: %w", err)
 	}
-	store.next = (store.next + 1) % recentSize
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(
+		ctx,
+		"INSERT INTO recent (minute, body) VALUES (?, ?)",
+		record.Time.Truncate(time.Minute).Unix(),
+		string(body),
+	); err != nil {
+		return fmt.Errorf("callstore: record recent call: %w", err)
+	}
+	if _, err := store.db.ExecContext(
+		ctx,
+		"DELETE FROM recent WHERE id NOT IN (SELECT id FROM recent ORDER BY id DESC LIMIT ?)",
+		recentSize,
+	); err != nil {
+		return fmt.Errorf("callstore: trim recent calls: %w", err)
+	}
 	return nil
 }
 
-// Recent returns up to limit of the newest calls since the process started,
-// newest first. Individual calls are kept only in memory.
+// Recent returns up to limit of the newest calls, newest first. Calls are
+// stored, so they survive a restart; only the newest recentSize are kept.
 func (store *Store) Recent(limit int) []latency.Record {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	records := make([]latency.Record, 0, min(limit, len(store.recent)))
-	for offset := 1; offset <= len(store.recent) && len(records) < limit; offset++ {
-		index := (store.next - offset + recentSize) % recentSize
-		if len(store.recent) < recentSize {
-			index = len(store.recent) - offset
+	if limit <= 0 {
+		return nil
+	}
+	limit = min(limit, recentSize)
+	rows, err := store.db.Query(
+		"SELECT body FROM recent ORDER BY id DESC LIMIT ?",
+		limit,
+	)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	records := make([]latency.Record, 0, limit)
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return records
 		}
-		records = append(records, store.recent[index])
+		var record latency.Record
+		if json.Unmarshal([]byte(body), &record) != nil {
+			continue
+		}
+		records = append(records, record)
 	}
 	return records
 }
@@ -473,6 +512,11 @@ func (store *Store) aggregate(ctx context.Context, since time.Time, group func(k
 	start := since.Truncate(time.Minute).Unix()
 	merged := map[key]*Counters{}
 	add := func(id key, counters *Counters) {
+		// A call that never acquired an account (every account rate-limited, or
+		// none configured) has nothing to attribute it to, so it is not usage.
+		if id.account == "" {
+			return
+		}
 		target := group(id)
 		if merged[target] == nil {
 			merged[target] = newCounters(target)

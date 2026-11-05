@@ -30,7 +30,7 @@ import (
 
 const (
 	defaultLoginTimeout = 5 * time.Minute
-	maxRecent           = 1000
+	maxRecent           = 500
 	maxFormBytes        = 16 << 10
 )
 

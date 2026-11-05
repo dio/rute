@@ -90,12 +90,13 @@ func TestCodexRateLimitIsReportedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 {
+	// Only the first call reached accounts; the WebSocket call found every
+	// account rate-limited, so it has no account to record.
+	if len(records) != 1 {
 		t.Fatalf("records = %+v", records)
 	}
 	if records[0].Outcome != latency.OutcomeRateLimited || records[0].Attempts != 2 ||
-		records[0].Endpoint != "responses" || records[1].Endpoint != "responses_ws" ||
-		records[1].Outcome != latency.OutcomeRateLimited {
-		t.Errorf("records = %+v", records)
+		records[0].Endpoint != "responses" || records[0].Account == "" {
+		t.Errorf("record = %+v", records[0])
 	}
 }
