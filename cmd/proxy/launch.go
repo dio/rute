@@ -123,7 +123,63 @@ func (launcher *launcher) clientHome(client string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create %s home: %w", client, err)
 	}
+	// Only cmd needs HOME overridden, which hides the user's own files from the
+	// tools it runs; link the ones those tools need.
+	if client != commandCodeCLIName {
+		return dir, nil
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return dir, nil
+	}
+	if err := linkHomeEntries(home, dir); err != nil {
+		_, _ = fmt.Fprintf(launcher.stderr, "rute: could not link user config into %s: %v\n", dir, err)
+	}
 	return dir, nil
+}
+
+// userHomeDir resolves the user's real home. It is a variable so tests can
+// redirect it.
+var userHomeDir = os.UserHomeDir
+
+// homePassthrough names user files linked into a prepared home so the tools a
+// client runs keep their configuration. The client's own config directory is
+// never linked: isolation is the point.
+var homePassthrough = []string{
+	".gitconfig",
+	".gitignore",
+	".git-credentials",
+	".config/git",
+	".config/gh",
+	".ssh",
+	".netrc",
+	".npmrc",
+	".gnupg",
+	".docker",
+	".aws",
+	".kube",
+}
+
+// linkHomeEntries symlinks each existing passthrough entry from home into
+// prepared, leaving anything already there alone.
+func linkHomeEntries(home, prepared string) error {
+	for _, name := range homePassthrough {
+		source := filepath.Join(home, name)
+		if _, err := os.Lstat(source); err != nil {
+			continue
+		}
+		target := filepath.Join(prepared, name)
+		if _, err := os.Lstat(target); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("prepare home for %s: %w", name, err)
+		}
+		if err := os.Symlink(source, target); err != nil {
+			return fmt.Errorf("link %s into the prepared home: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func clientName(provider string) (string, error) {
