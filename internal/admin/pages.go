@@ -181,8 +181,9 @@ func (server *Server) handleDashboard(writer http.ResponseWriter, request *http.
 
 func providerRow(status codexpool.Status, accounts map[string]*callstore.Counters) providerView {
 	view := providerView{Name: status.Provider}
-	var active, cooling, reauth int
+	var available, cooling, reauth, inFlight int
 	for _, account := range status.Accounts {
+		inFlight += account.InFlight
 		row := accountView{
 			Provider: status.Provider,
 			Name:     account.Name,
@@ -211,8 +212,8 @@ func providerRow(status codexpool.Status, accounts map[string]*callstore.Counter
 			}
 			row.Attention = true
 		default:
-			active++
-			row.State = "active"
+			available++
+			row.State = "available"
 		}
 		if counters, ok := accounts[status.Provider+"/"+account.Name]; ok {
 			stats := counters.Row()
@@ -225,7 +226,7 @@ func providerRow(status codexpool.Status, accounts map[string]*callstore.Counter
 		}
 		view.Accounts = append(view.Accounts, row)
 	}
-	parts := []string{fmt.Sprintf("%d active", active)}
+	parts := []string{fmt.Sprintf("%d available", available)}
 	if cooling > 0 {
 		parts = append(parts, fmt.Sprintf("%d cooling", cooling))
 	}
@@ -233,6 +234,7 @@ func providerRow(status codexpool.Status, accounts map[string]*callstore.Counter
 		parts = append(parts, fmt.Sprintf("%d need login", reauth))
 	}
 	view.Summary = fmt.Sprintf("%s (%s)", plural(len(status.Accounts), "account"), strings.Join(parts, ", "))
+	view.Summary += fmt.Sprintf(", %s in flight", plural(inFlight, "call"))
 
 	view.Balance = string(status.Balance)
 	if len(status.Order) > 0 {
