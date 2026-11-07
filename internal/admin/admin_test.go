@@ -261,7 +261,7 @@ func TestDashboardShowsAccountsAndHistory(t *testing.T) {
 	}
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"claude: 2 accounts (2 active)",
+		"claude: 2 accounts (2 available), 0 calls in flight",
 		"priority (default &gt; personal), max 6 in flight",
 		"claude/personal", "2-3", "2.1s", "82",
 		"rate_limited",
