@@ -279,3 +279,28 @@ func TestUsageGroupsByPeriodAccountAndModel(t *testing.T) {
 		t.Errorf("totals = %+v", totals)
 	}
 }
+
+func TestRecentPreservesErrorDiagnostics(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "metrics.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := latency.Record{Time: time.Now(), Provider: "codex", Account: "default", Outcome: latency.OutcomeUpstreamError, ErrorCode: "missing_tool_call", ErrorMessage: "No matching tool call"}
+	if err := store.Write(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recent := reopened.Recent(1)
+	if len(recent) != 1 || recent[0].ErrorCode != record.ErrorCode || recent[0].ErrorMessage != record.ErrorMessage {
+		t.Fatalf("recent=%+v", recent)
+	}
+}

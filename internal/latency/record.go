@@ -41,6 +41,8 @@ type Record struct {
 	Attempts     int     `json:"attempts,omitempty"`
 	Status       int     `json:"status,omitempty"`
 	Outcome      string  `json:"outcome"`
+	ErrorCode    string  `json:"error_code,omitempty"`
+	ErrorMessage string  `json:"error_message,omitempty"`
 	WaitMS       float64 `json:"wait_ms,omitempty"`
 	DurationMS   float64 `json:"duration_ms"`
 	OutputTokens int64   `json:"output_tokens,omitempty"`
@@ -59,6 +61,8 @@ func (record *Record) Fill(start, end time.Time, observer *Observer) {
 	if observer == nil {
 		return
 	}
+	record.ErrorCode = observer.errorCode
+	record.ErrorMessage = observer.errorMessage
 	usage := observer.Usage()
 	record.OutputTokens = usage.OutputTokens
 	record.InputTokens = usage.InputTokens

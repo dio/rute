@@ -31,6 +31,7 @@ type Observer struct {
 	input, cached, cacheWrite, cacheRead int64
 	completed                            bool
 	failed                               bool
+	errorCode, errorMessage              string
 }
 
 // NewObserver returns an Observer that reads the wall clock.
@@ -138,11 +139,10 @@ type event struct {
 	Error    json.RawMessage `json:"error"`
 	Usage    *usage          `json:"usage"`
 	Response *struct {
-		Usage *usage `json:"usage"`
+		Usage *usage          `json:"usage"`
+		Error json.RawMessage `json:"error"`
 	} `json:"response"`
-	Message *struct {
-		Usage *usage `json:"usage"`
-	} `json:"message"`
+	Message json.RawMessage `json:"message"`
 	Choices []struct {
 		Delta        map[string]json.RawMessage `json:"delta"`
 		FinishReason *string                    `json:"finish_reason"`
@@ -162,12 +162,14 @@ func (observer *Observer) event(data []byte, at time.Time) {
 	if json.Unmarshal(data, &value) != nil {
 		return
 	}
-	if len(value.Error) > 0 && !bytes.Equal(value.Error, []byte("null")) {
-		observer.failed = true
+	observer.observeError(value.Error)
+	if value.Response != nil {
+		observer.observeError(value.Response.Error)
 	}
 	switch {
 	case value.Type == "error", value.Type == "response.failed":
 		observer.failed = true
+		observer.observeError(data)
 	case value.Type == "content_block_delta", strings.HasSuffix(value.Type, ".delta"):
 		observer.token(at)
 	case value.Type == "response.completed",
@@ -189,7 +191,12 @@ func (observer *Observer) event(data []byte, at time.Time) {
 		observer.usage(value.Response.Usage)
 	}
 	if value.Message != nil {
-		observer.usage(value.Message.Usage)
+		var message struct {
+			Usage *usage `json:"usage"`
+		}
+		if json.Unmarshal(value.Message, &message) == nil {
+			observer.usage(message.Usage)
+		}
 	}
 	if observer.mode == 'j' && observer.tokens > 0 && !observer.failed {
 		observer.completed = true
@@ -286,4 +293,35 @@ func (observer *Observer) Completed() bool {
 // Failed reports whether an error event was seen.
 func (observer *Observer) Failed() bool {
 	return observer.failed
+}
+
+// observeError retains only bounded diagnostic fields, never the complete event.
+func (observer *Observer) observeError(data json.RawMessage) {
+	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return
+	}
+	observer.failed = true
+	var detail struct {
+		Code    json.RawMessage `json:"code"`
+		Message json.RawMessage `json:"message"`
+	}
+	if json.Unmarshal(data, &detail) != nil {
+		return
+	}
+	var code, message string
+	_ = json.Unmarshal(detail.Code, &code)
+	_ = json.Unmarshal(detail.Message, &message)
+	if observer.errorCode == "" {
+		observer.errorCode = boundedErrorText(code, 256)
+	}
+	if observer.errorMessage == "" {
+		observer.errorMessage = boundedErrorText(message, 2048)
+	}
+}
+
+func boundedErrorText(value string, limit int) string {
+	if len(value) > limit {
+		value = value[:limit]
+	}
+	return strings.ToValidUTF8(value, "")
 }
