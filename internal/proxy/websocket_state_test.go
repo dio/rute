@@ -25,7 +25,7 @@ func TestWebSocketContinuationKeepsToolContext(t *testing.T) {
 		input, _ := body["input"].([]any)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if len(input) == 1 && input[0].(map[string]any)["type"] == "function_call_output" {
-			fmt.Fprint(w, "data: {\"type\":\"error\",\"error\":{\"code\":\"missing_tool_call\",\"message\":\"No matching tool call\"}}\n\n")
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"error\",\"error\":{\"code\":\"missing_tool_call\",\"message\":\"No matching tool call\"}}\n\n")
 			return
 		}
 		if len(input) > 1 {
@@ -36,7 +36,7 @@ func TestWebSocketContinuationKeepsToolContext(t *testing.T) {
 				t.Error("forwarded previous_response_id")
 			}
 		}
-		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{}\"}]}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{}\"}]}}\n\n")
 	}))
 	defer upstream.Close()
 	server := httptest.NewServer(newTestHandler(t, upstream.URL, &staticCredentials{token: codexauth.Token{AccessToken: "test"}}))
@@ -47,7 +47,7 @@ func TestWebSocketContinuationKeepsToolContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	for _, request := range []string{
 		`{"type":"response.create","model":"gpt-test","input":"Look this up"}`,
 		`{"type":"response.create","model":"gpt-test","previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"call_1","output":"found"}]}`,
@@ -73,7 +73,7 @@ func TestWebSocketContinuationKeepsToolContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.CloseNow()
+	defer func() { _ = other.CloseNow() }()
 	if err := other.Write(ctx, websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-test","previous_response_id":"resp_1","input":"continue"}`)); err != nil {
 		t.Fatal(err)
 	}

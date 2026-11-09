@@ -298,7 +298,7 @@ func TestRecentPreservesErrorDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	recent := reopened.Recent(1)
 	if len(recent) != 1 || recent[0].ErrorCode != record.ErrorCode || recent[0].ErrorMessage != record.ErrorMessage {
 		t.Fatalf("recent=%+v", recent)
