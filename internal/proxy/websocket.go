@@ -42,6 +42,7 @@ func (handler *Handler) handleResponsesWebSocket(
 
 	ctx := request.Context()
 	sessionID := requestSessionID(request)
+	var continuation responseContinuation
 	for {
 		messageType, message, readErr := connection.Read(ctx)
 		if readErr != nil {
@@ -104,6 +105,7 @@ func (handler *Handler) handleResponsesWebSocket(
 			continue
 		}
 		body["model"] = resolution.UpstreamModel
+		var turn responseTurn
 		var (
 			response    *http.Response
 			upstreamErr error
@@ -118,6 +120,13 @@ func (handler *Handler) handleResponsesWebSocket(
 				sessionID,
 			)
 		} else {
+			errorType, expandErr := continuation.expand(body, resolution.UpstreamModel, handler.config.MaxRequestSize)
+			if expandErr != nil {
+				if !handler.writeWebSocketError(ctx, connection, errorType, expandErr.Error()) {
+					return
+				}
+				continue
+			}
 			normalized, normalizeErr := normalizeResponses(
 				body,
 				handler.config.DefaultModel,
@@ -134,6 +143,7 @@ func (handler *Handler) handleResponsesWebSocket(
 				}
 				continue
 			}
+			turn.input, _ = normalized["input"].([]any)
 			response, upstreamErr = handler.upstream(ctx, "responses_ws", normalized, sessionID)
 		}
 		if upstreamErr != nil {
@@ -148,8 +158,11 @@ func (handler *Handler) handleResponsesWebSocket(
 			}
 			continue
 		}
-		ok := handler.forwardWebSocketResponse(ctx, connection, response)
+		ok := handler.forwardWebSocketResponse(ctx, connection, response, &turn)
 		response.Body.Close()
+		if resolution.Provider == accountstore.ProviderCodex {
+			continuation.remember(&turn, resolution.UpstreamModel, handler.config.MaxRequestSize)
+		}
 		if !ok {
 			return
 		}
@@ -205,6 +218,7 @@ func (handler *Handler) forwardWebSocketResponse(
 	ctx context.Context,
 	connection *websocket.Conn,
 	response *http.Response,
+	turn *responseTurn,
 ) bool {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		upstreamErr := upstreamAPIError(response)
@@ -227,6 +241,8 @@ func (handler *Handler) forwardWebSocketResponse(
 				"Codex upstream returned an invalid response",
 			)
 		}
+		turn.observe(body)
+		turn.finished = true
 		return writeWebSocketMessage(ctx, connection, body)
 	}
 
@@ -235,6 +251,7 @@ func (handler *Handler) forwardWebSocketResponse(
 		if payload == nil {
 			return nil
 		}
+		turn.observe(payload)
 		if !writeWebSocketMessage(ctx, connection, payload) {
 			return errors.New("write WebSocket event")
 		}
@@ -248,6 +265,7 @@ func (handler *Handler) forwardWebSocketResponse(
 			"Codex upstream stream failed",
 		)
 	}
+	turn.finished = true
 	return true
 }
 

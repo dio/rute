@@ -100,3 +100,29 @@ func TestCodexRateLimitIsReportedAndRecorded(t *testing.T) {
 		t.Errorf("record = %+v", records[0])
 	}
 }
+
+func TestStreamErrorDetailsAreRecorded(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"missing_tool_call\",\"message\":\"No matching tool call\"}}}\n\n"))
+	}))
+	defer upstream.Close()
+	sink := &recordSink{}
+	handler, err := New(Config{UpstreamURL: upstream.URL, DefaultModel: "gpt-test", Metrics: sink}, newTwoAccountPool(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"ping","stream":true}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.records) != 1 {
+		t.Fatalf("records=%+v", sink.records)
+	}
+	record := sink.records[0]
+	if record.Status != 200 || record.Outcome != latency.OutcomeUpstreamError || record.ErrorCode != "missing_tool_call" || record.ErrorMessage != "No matching tool call" || record.OutputTokens != 0 {
+		t.Fatalf("record=%+v", record)
+	}
+}

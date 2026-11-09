@@ -514,24 +514,26 @@ Call history is stored as per-minute counters in `metrics.db` in rute's state
 directory (`~/Library/Application Support/rute/` on macOS,
 `~/.local/state/rute/` on Linux). Each row counts calls, outcomes, failovers,
 and tokens for one account, model, and calls-in-flight range, with histograms
-for wait and tokens per second. Prompts, responses, and individual calls are
-never written to disk, so the file stays small. Wait and tok/s percentiles are
+for wait and tokens per second. Full request and response bodies are not
+recorded. Wait and tok/s percentiles are
 estimates from the histograms.
 
 Counters are written every 10 seconds and kept for 30 days
 (`-metrics-retention`). `-metrics-db=PATH` moves the file and
 `-metrics-db=off` disables it. `rute stats` without file arguments reads the
 same database. The dashboard's recent-calls list keeps the newest 500 calls in
-`metrics.db`, so it survives a restart. For per-call records, use
-`-metrics-file`.
+`metrics.db`, so it survives a restart. Stream failures include `error_code`
+and `error_message` when supplied by upstream, capped at 256 and 2048 bytes.
+These fields are also available from `GET /v1/calls/recent` and `-metrics-file`.
+Error messages are upstream text and may quote parts of a request.
 
 ### Measuring latency under concurrency
 
 `-metrics-file` appends one JSON line per inference call. A line contains the
 provider, endpoint, model, account name, calls in flight on that account when
 the call started, status, outcome, time to first token (`wait_ms`), duration,
-output tokens, and output tokens per second after the first token. It never
-contains prompts, outputs, or credentials.
+output tokens, and output tokens per second after the first token. Failed
+streams also include the bounded error diagnostics described above.
 
 ```sh
 rute serve -metrics-file="$HOME/Library/Logs/rute/calls.jsonl"
@@ -679,9 +681,17 @@ Connect to `ws://127.0.0.1:20128/v1/responses` and send one
 
 The proxy makes a Codex HTTP streaming request and forwards each Responses SSE
 event as a WebSocket text message. Requests on a connection are processed
-sequentially. Because the Codex request is forced to `store: false`,
-`previous_response_id` is not supported; resend the input and prior output items
-needed for each turn.
+sequentially. For Codex, the proxy retains the latest successfully completed
+response and its input in memory on that connection. A `previous_response_id`
+matching that response and model expands the next input to include the prior
+input and output items before sending the HTTP request with `store: false`.
+
+The transcript is bounded by the request size limit and discarded when the
+connection closes. Unknown, older, or oversized cached responses return
+`previous_response_not_found`. Resend the full input without
+`previous_response_id` to recover. A full-input request starts a new transcript
+after it completes successfully. Expanded requests must also fit the request
+size limit.
 
 ### OpenWorker
 
